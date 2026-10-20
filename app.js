@@ -55,16 +55,30 @@ function save() {
   store.set(`${SAVE_KEY}-${session.role}`, data);
 }
 
+// A tab with a game open marks it as live every heartbeat, so other tabs of
+// the same browser (say, opening the invite link to join as someone else)
+// don't take it over.
+const liveKey = (role) => `${SAVE_KEY}-live-${role}`;
+function markLive() {
+  if (session && !ended) store.set(liveKey(session.role), { code: session.code, t: Date.now() });
+}
+function openElsewhere(saved) {
+  const live = store.get(liveKey(saved.role));
+  return live?.code === saved.code && Date.now() - live.t < HEARTBEAT_MS * 3;
+}
+
 // This tab's own game if it has one, otherwise the most likely game to resume
-// (the owner's copy is the real one).
+// (the owner's copy is the real one), unless another tab has it open.
 function loadSave() {
-  return tabStore.get(SAVE_KEY) || store.get(`${SAVE_KEY}-owner`) || store.get(`${SAVE_KEY}-client`);
+  return tabStore.get(SAVE_KEY) || [store.get(`${SAVE_KEY}-owner`), store.get(`${SAVE_KEY}-client`)]
+    .find((s) => s && !openElsewhere(s)) || null;
 }
 
 function deleteSave(saved) {
   tabStore.del(SAVE_KEY);
-  const k = `${SAVE_KEY}-${saved.role}`;
-  if (store.get(k)?.code === saved.code) store.del(k);
+  for (const k of [`${SAVE_KEY}-${saved.role}`, liveKey(saved.role)]) {
+    if (store.get(k)?.code === saved.code) store.del(k);
+  }
 }
 
 // Mad Libs sentences. Only the owner uses them, but they're small.
@@ -130,6 +144,7 @@ function start() {
   pending = [];
   links = new Map();
   save();
+  markLive();
   location.hash = session.code;
   $('home').hidden = true;
   $('game').hidden = false;
@@ -437,6 +452,7 @@ function dropLink(c) {
 
 setInterval(() => {
   if (!session) return;
+  markLive();
   const now = Date.now();
   if (session.role === 'owner') {
     // People still asking to come in only need to know we're here.
