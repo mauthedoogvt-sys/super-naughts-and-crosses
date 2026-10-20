@@ -18,11 +18,13 @@ function randInt(n) {
 // ---- The board ------------------------------------------------------------
 // A grid of rows × cols that rules can grow and shrink. Squares are keyed
 // "r,c" and can lie outside the grid. A row or column deleted from the middle
-// stays behind as a gap of dead squares, splitting the board; each round one
-// gap square is drawn to be a wildcard. A row or column added later is whole
-// even where it crosses a gap, and one added over a gap fills it back in. Tiles a Shift pushes off the grid
+// stays behind as a gap, splitting the board. Every square a deletion takes
+// away is replaced by a wildcard (left in the gap, or just outside the grid
+// if it was an edge). A row or column added later is whole even where it
+// crosses a gap, and one added over a gap fills it back in. Tiles a Shift pushes off the grid
 // stay where they land but only count for diagonals. Wildcard squares (on the
-// grid or off it) count as X and O, but a line can use only one wildcard.
+// grid or off it) count as X and O, but a line can use only one wildcard, and
+// a wildcard in a winning line is used up.
 
 const key = (r, c) => `${r},${c}`;
 const unkey = (k) => k.split(',').map(Number);
@@ -91,7 +93,7 @@ function lineLabel(s, axis, i) {
 function worth(s, k, seat, diagonal) {
   const t = s.board[k];
   if (t) return t === seat && (diagonal || onGrid(s, k)) ? 'tile' : null;
-  return s.wilds.includes(k) || s.gapWild === k ? 'wild' : null;
+  return s.wilds.includes(k) ? 'wild' : null;
 }
 
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
@@ -99,7 +101,6 @@ const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 // Three in a row for `seat`, as a list of squares, or null.
 function findLine(s, seat) {
   const starts = [...Object.keys(s.board).filter((k) => s.board[k] === seat), ...s.wilds];
-  if (s.gapWild) starts.push(s.gapWild);
   for (const k of starts) {
     const [r, c] = unkey(k);
     for (const [dr, dc] of DIRS) {
@@ -117,19 +118,20 @@ function findLine(s, seat) {
 function moveAll(s, dr, dc) {
   const mv = (k) => { const [r, c] = unkey(k); return key(r + dr, c + dc); };
   s.wilds = s.wilds.map(mv);
+  s.spent = (s.spent || []).map(mv);
+  if (s.winLine) s.winLine = s.winLine.map(mv);
   s.curses.forEach((x) => { x.key = mv(x.key); });
   s.board = Object.fromEntries(Object.entries(s.board).map(([k, t]) => [mv(k), t]));
   s.grid.dead = s.grid.dead.map(mv);
 }
 
 // Cuts off rows and columns at the edges of the grid that are all gap, and
-// anything lying in line with them.
+// any curses in line with them. Wildcards stay, just outside the grid.
 function trimGaps(s) {
   const g = s.grid;
   const dead = (axis, i) => !liveLines(s, axis).includes(i);
   const drop = (axis, i) => {
     const off = (k) => unkey(k)[axis === 'row' ? 0 : 1] !== i;
-    s.wilds = s.wilds.filter(off);
     s.curses = s.curses.filter((x) => off(x.key));
     g.dead = g.dead.filter(off);
     if (axis === 'row') g.rows--;
@@ -207,7 +209,7 @@ const RULES = {
   },
   delLine: {
     name: 'Delete a Line', icon: '✂️', target: 'line',
-    desc: 'Delete a row or column. Take one from the middle and the board splits — each round, one square of the gap is a wildcard.',
+    desc: 'Delete a row or column. Every square taken away is replaced by a wildcard. Take one from the middle and the board splits.',
     ok: (s) => gridSquares(s).length > 9 && (liveLines(s, 'row').length > 3 || liveLines(s, 'col').length > 3),
     apply(s, seat, t) {
       if (!t || (t.axis !== 'row' && t.axis !== 'col')) return null;
@@ -215,9 +217,10 @@ const RULES = {
       if (live.length <= 3 || !live.includes(i)) return null;
       const label = lineLabel(s, t.axis, i), middle = i !== live[0] && i !== live.at(-1);
       // It becomes a gap; gaps that end up at an edge are cut off entirely.
-      g.dead = [...new Set([...g.dead, ...lineKeys(g, t.axis, i)])];
+      const gone = lineKeys(g, t.axis, i).filter((k) => !g.dead.includes(k));
+      g.dead.push(...gone);
+      s.wilds.push(...gone.filter((k) => !s.wilds.includes(k)));
       trimGaps(s);
-      s.wilds = s.wilds.filter((k) => !isGap(g, ...unkey(k)));
       return middle ? `Deleted ${label} — the board is split` : `Deleted ${label}`;
     },
   },
@@ -251,7 +254,7 @@ const RULES = {
   },
   wildcard: {
     name: 'Wildcard', icon: '★', target: 'wild',
-    desc: 'Add a wildcard square — on the board or just outside it. It counts as X and O, but a line can only use one wildcard.',
+    desc: 'Add a wildcard square — on the board or just outside it. It counts as X and O, but a line can only use one wildcard, and it’s used up once it’s in a winning line.',
     apply(s, seat, k) {
       if (typeof k !== 'string' || !/^-?\d+,-?\d+$/.test(k) || s.wilds.includes(k)) return null;
       const [r, c] = unkey(k);
@@ -550,7 +553,7 @@ function createGame(code) {
     grid: newGrid(),
     board: {},                     // "r,c" -> 'x' | 'o'
     wilds: [],                     // wildcard squares, "r,c"
-    gapWild: null,                 // this round's wildcard square in a gap
+    spent: [],                     // wildcards used up in the winning line, to show until next round
     curses: [],                    // [{ key, by }], hidden from both players
     pending: [],                   // rules that start next round
     active: [],                    // rules in play this round
@@ -600,9 +603,8 @@ function startRound(s) {
   s.roundWinner = null;
   s.winHow = null;
   s.offer = null;
+  s.spent = [];
   s.curses = s.curses.filter((x) => playable(s, x.key));
-  const gaps = rectKeys(s).filter((k) => isGap(s.grid, ...unkey(k)) && !s.wilds.includes(k));
-  s.gapWild = gaps.length ? gaps[randInt(gaps.length)] : null;
   s.active = s.pending;
   s.pending = [];
   s.turnLog = [];
@@ -670,6 +672,12 @@ function endTurn(s, seat) {
 
 // After a round the loser places a row or column, then the winner picks a rule.
 function endRound(s, winner, how) {
+  // A wildcard in the winning line is used up.
+  s.spent = (s.winLine || []).filter((k) => s.wilds.includes(k));
+  if (s.spent.length) {
+    s.wilds = s.wilds.filter((k) => !s.spent.includes(k));
+    note(s, 'The wildcard in the winning line is used up.');
+  }
   s.roundWinner = winner;
   s.winHow = how;
   s.scores[winner]++;

@@ -706,22 +706,23 @@ function square(s, r, c) {
     k, r, c,
     kind: !inRect(g, r, c) ? 'off' : isGap(g, r, c) ? 'gap' : 'play',
     tile: s.board[k] || null,
-    wild: s.wilds.includes(k) || s.gapWild === k,
+    wild: s.wilds.includes(k),
+    spent: (s.spent || []).includes(k),
     win: !!s.winLine?.includes(k),
     curse: s.curses.some((x) => x.key === k), // only ever seen by people watching
   };
 }
 
 function squareHtml(sq, attrs) {
-  if (sq.kind === 'off' && !sq.tile && !sq.wild && !attrs) return `<span class="cell off" data-k="${sq.k}"></span>`;
-  const cls = ['cell', sq.kind, sq.wild && 'wild', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
-  const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>` : sq.wild ? '<span class="star">★</span>' : '';
+  if (sq.kind === 'off' && !sq.tile && !sq.wild && !sq.spent && !attrs) return `<span class="cell off" data-k="${sq.k}"></span>`;
+  const cls = ['cell', sq.kind, sq.wild && 'wild', sq.spent && 'spent', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
+  const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>` : sq.wild || sq.spent ? '<span class="star">★</span>' : '';
   return `<button class="${cls}" data-k="${sq.k}" ${attrs || 'disabled'}>${inner}</button>`;
 }
 
 function gridHtml(s, o = {}) {
   let r0 = 0, r1 = s.grid.rows - 1, c0 = 0, c1 = s.grid.cols - 1;
-  for (const k of [...Object.keys(s.board), ...s.wilds]) {
+  for (const k of [...Object.keys(s.board), ...s.wilds, ...(s.spent || [])]) {
     const [r, c] = unkey(k);
     r0 = Math.min(r0, r); r1 = Math.max(r1, r);
     c0 = Math.min(c0, c); c1 = Math.max(c1, c);
@@ -1042,7 +1043,6 @@ function roundRulesHtml() {
     if (e.type === 'turnSwap') return `🔄 Turn Swap: ${by} opponent’s turns may be snatched.`;
     return '';
   });
-  if (state.gapWild) notes.push('★ One square of the gap is a wildcard this round.');
   return notes.length ? `<ul class="round-rules">${notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : '';
 }
 
@@ -1102,7 +1102,7 @@ function rulePhaseHtml() {
 function pickerHtml(type) {
   const R = RULES[type], g = state.grid;
   const t = (v) => `data-target="${esc(JSON.stringify(v))}"`;
-  const blank = { ...state, board: {}, winLine: null, gapWild: null, curses: [] };
+  const blank = { ...state, board: {}, winLine: null, spent: [], curses: [] };
   const btn = (label, title, target) => `<button class="edge-btn" title="${title}" ${t(target)}>${label}</button>`;
   const rowOk = (r) => liveLines(state, 'row').includes(r), colOk = (c) => liveLines(state, 'col').includes(c);
   let how, board;

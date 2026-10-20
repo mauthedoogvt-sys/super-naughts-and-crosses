@@ -225,6 +225,9 @@ button.cell.off:not(:disabled):hover { border-color: var(--muted); }
 }
 .cell.wild { background: color-mix(in srgb, #9b59d0 18%, var(--card)); border-color: #9b59d0; }
 .cell.wild .star { color: #9b59d0; }
+/* A wildcard used up in the winning line, shown until the next round. */
+.cell.spent .star { color: #9b59d0; opacity: 0.4; text-decoration: line-through; }
+.cell.spent.win { background: var(--win); }
 .cell.cursed { box-shadow: inset 0 0 0 3px #555; }
 .cell.cursed::after { content: '💀'; position: absolute; font-size: 0.8rem; opacity: 0.5; transform: translate(150%, -150%); }
 .cell { position: relative; }
