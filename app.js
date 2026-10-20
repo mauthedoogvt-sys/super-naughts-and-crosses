@@ -57,15 +57,24 @@ function save() {
 
 // A tab with a game open marks it as live every heartbeat, so other tabs of
 // the same browser (say, opening the invite link to join as someone else)
-// don't take it over.
-const liveKey = (role) => `${SAVE_KEY}-live-${role}`;
+// don't take it over. Each of us in each game gets their own mark, so games
+// in other tabs can't overwrite it.
+const LIVE_PREFIX = `${SAVE_KEY}-live-`;
+const liveKey = (id) => LIVE_PREFIX + id;
 function markLive() {
-  if (session && !ended) store.set(liveKey(session.role), { code: session.code, t: Date.now() });
+  if (session && !ended) store.set(liveKey(session.id), { code: session.code, t: Date.now() });
 }
 function openElsewhere(saved) {
-  const live = store.get(liveKey(saved.role));
+  const live = store.get(liveKey(saved.id));
   return live?.code === saved.code && Date.now() - live.t < HEARTBEAT_MS * 3;
 }
+
+// Clear out marks left by tabs that were closed without leaving.
+try {
+  for (const k of Object.keys(localStorage)) {
+    if (k.startsWith(LIVE_PREFIX) && !(Date.now() - store.get(k)?.t < 3600e3)) store.del(k);
+  }
+} catch {}
 
 // This tab's own game if it has one, otherwise the most likely game to resume
 // (the owner's copy is the real one), unless another tab has it open.
@@ -76,9 +85,8 @@ function loadSave() {
 
 function deleteSave(saved) {
   tabStore.del(SAVE_KEY);
-  for (const k of [`${SAVE_KEY}-${saved.role}`, liveKey(saved.role)]) {
-    if (store.get(k)?.code === saved.code) store.del(k);
-  }
+  if (store.get(`${SAVE_KEY}-${saved.role}`)?.code === saved.code) store.del(`${SAVE_KEY}-${saved.role}`);
+  store.del(liveKey(saved.id));
 }
 
 // Mad Libs sentences. Only the owner uses them, but they're small.
@@ -177,7 +185,7 @@ function shutdown() {
   clearTimeout(retryTimer);
   clearTimeout(advanceTimer);
   advanceFor = null;
-  deleteSave(session);
+  if (!session.keepSave) deleteSave(session);
   connected = false;
   conn = null;
   links = new Map();
@@ -372,6 +380,11 @@ function onData(c, d) {
     setStatus('Waiting to be let in…', 'warn');
   }
   if (d.t === 'rejected') endGame("The host didn't let you in.");
+  if (d.t === 'duplicate') {
+    // The save belongs to the tab that's still playing it, so leave it alone.
+    session.keepSave = true;
+    endGame('This game is already open in another tab of this browser, so it carries on there.');
+  }
   if (d.t === 'bye') endGame('The host closed the room.');
 }
 
@@ -380,7 +393,11 @@ function onData(c, d) {
 function onHello(c, d) {
   const id = String(d.id || '').slice(0, 64);
   if (!id) return;
-  if (memberName(id) !== undefined) return admit(c, id); // coming back
+  if (memberName(id) !== undefined) { // coming back
+    const old = links.get(id);
+    if (old && old !== c && old.open && Date.now() - old.heard < HEARTBEAT_MS * 2) return checkDuplicate(c, id);
+    return admit(c, id);
+  }
   for (const p of pending) if (p.id === id && p.conn !== c) p.conn.close();
   pending = pending.filter((p) => p.id !== id);
   const name = cleanName(d.name, 'Player');
@@ -388,6 +405,25 @@ function onHello(c, d) {
   c.send({ t: 'wait' });
   toast(`${name} wants to join`);
   render();
+}
+
+// Someone says hello while their old connection still looks alive. Usually
+// that connection just hasn't closed yet (they reloaded), but it can be a
+// second tab of the same browser that picked up their saved game. The old one
+// pings every few seconds, so wait a little: if it's still talking, the new
+// one is the duplicate and gets turned away instead of kicking them out.
+function checkDuplicate(c, id) {
+  const since = Date.now();
+  setTimeout(() => {
+    if (!c.open) return;
+    const cur = links.get(id);
+    if (cur && cur !== c && cur.open && cur.heard > since) {
+      c.send({ t: 'duplicate' });
+      setTimeout(() => c.close(), 500);
+    } else {
+      admit(c, id);
+    }
+  }, HEARTBEAT_MS * 2);
 }
 
 function admit(c, id) {
