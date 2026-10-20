@@ -146,6 +146,7 @@ function joinGame(code) {
 function resumeGame(saved) {
   session = { code: saved.code, role: saved.role, id: saved.id };
   state = saved.state;
+  upgradeGrid(state);
   start();
 }
 
@@ -712,10 +713,10 @@ function square(s, r, c) {
 }
 
 function squareHtml(sq, attrs) {
-  if (sq.kind === 'off' && !sq.tile && !sq.wild && !attrs) return '<span class="cell off"></span>';
+  if (sq.kind === 'off' && !sq.tile && !sq.wild && !attrs) return `<span class="cell off" data-k="${sq.k}"></span>`;
   const cls = ['cell', sq.kind, sq.wild && 'wild', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
   const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>` : sq.wild ? '<span class="star">★</span>' : '';
-  return `<button class="${cls}" ${attrs || 'disabled'}>${inner}</button>`;
+  return `<button class="${cls}" data-k="${sq.k}" ${attrs || 'disabled'}>${inner}</button>`;
 }
 
 function gridHtml(s, o = {}) {
@@ -1027,6 +1028,7 @@ function panelHtml() {
   }
 
   if (state.phase === 'duel') return duelHtml();
+  if (state.phase === 'place') return placePhaseHtml();
   if (state.phase === 'rule') return rulePhaseHtml();
   return '';
 }
@@ -1044,12 +1046,43 @@ function roundRulesHtml() {
   return notes.length ? `<ul class="round-rules">${notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : '';
 }
 
+// Who won the round and how, above the board between rounds.
+function roundOverHtml() {
+  const w = state.roundWinner;
+  const head = w === mySeat() ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
+  const how = { line: 'Three in a row.', shift: 'Three in a row, thanks to the Shift.', duel: 'Decided by bonus game.' }[state.winHow];
+  return `<h2>${head}</h2><p>${how}</p>`;
+}
+
+// gridHtml() options for placing a row or column on board s: a ＋ left of
+// each row and above each column it can go in (just outside the grid, or over
+// a gap). attr(target) gives the attribute that sends it.
+function placeOpts(s, attr) {
+  const btn = (axis, i) => {
+    if (!canPlace(s, axis, i)) return '';
+    const what = axis === 'row' ? 'row' : 'column', n = axis === 'row' ? s.grid.rows : s.grid.cols;
+    const title = i === -1 ? `Add a ${what} ${axis === 'row' ? 'on top' : 'on the left'}`
+      : i === n ? `Add a ${what} ${axis === 'row' ? 'on the bottom' : 'on the right'}`
+      : `Fill in the gaps in this ${what}`;
+    return `<button class="edge-btn" title="${title}" data-line="${axis}:${i}" ${attr({ axis, index: i })}>＋</button>`;
+  };
+  return { ring: 1, edges: { left: (r) => btn('row', r), top: (c) => btn('col', c) } };
+}
+
+// The round's loser adds a row or column, on the main board.
+function placePhaseHtml() {
+  const w = state.roundWinner, placer = other(w), mine = placer === mySeat();
+  const msg = mine
+    ? '<p class="turn mine">You lost this round, so <b>add a row or column</b> to the board. Click a ＋ — outside an edge, or by a gap to fill it in.</p>'
+    : `<p class="turn">Waiting for ${nameOf(placer)} to add a row or column… then ${you(w)} ${w === mySeat() ? 'pick' : 'picks'} a rule.</p>`;
+  const opts = mine ? placeOpts(state, (v) => `data-place="${esc(JSON.stringify(v))}"`) : {};
+  return `${roundOverHtml()}${msg}${gridHtml(state, opts)}${duelHistoryHtml(false)}`;
+}
+
 let ruleDraft = { round: null, type: null }; // the rule card you've clicked on
 
 function rulePhaseHtml() {
   const w = state.roundWinner, chooser = w === mySeat();
-  const head = chooser ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
-  const how = { line: 'Three in a row.', shift: 'Three in a row, thanks to the Shift.', duel: 'Decided by bonus game.' }[state.winHow];
   if (ruleDraft.round !== state.round) ruleDraft = { round: state.round, type: null };
   const sel = chooser ? ruleDraft.type : null;
   const cards = `<div class="rule-cards">${state.offer.map((k) => {
@@ -1061,7 +1094,7 @@ function rulePhaseHtml() {
     ? `<p><b>Pick a rule:</b></p>${cards}${sel ? pickerHtml(sel) : ''}
        <button type="button" class="ghost" data-skip>Skip — no rule</button>`
     : `<p>Waiting for ${nameOf(w)} to pick a rule…</p>${cards}`;
-  return `<h2>${head}</h2><p>${how}</p>${gridHtml(state, { small: true })}${duelHistoryHtml(false)}${body}`;
+  return `${roundOverHtml()}${gridHtml(state, { small: true })}${duelHistoryHtml(false)}${body}`;
 }
 
 // How the chosen rule is aimed, on next round's (empty) board. Every button
@@ -1073,14 +1106,9 @@ function pickerHtml(type) {
   const btn = (label, title, target) => `<button class="edge-btn" title="${title}" ${t(target)}>${label}</button>`;
   const rowOk = (r) => liveLines(state, 'row').includes(r), colOk = (c) => liveLines(state, 'col').includes(c);
   let how, board;
-  if (R.target === 'side') {
-    how = 'Click an edge to add a row or column there.';
-    board = gridHtml(blank, { edges: {
-      top: (c) => colOk(c) && btn('＋', 'Add a row on top', 'top'),
-      bottom: (c) => colOk(c) && btn('＋', 'Add a row on the bottom', 'bottom'),
-      left: (r) => rowOk(r) && btn('＋', 'Add a column on the left', 'left'),
-      right: (r) => rowOk(r) && btn('＋', 'Add a column on the right', 'right'),
-    } });
+  if (R.target === 'place') {
+    how = 'Click a ＋ to add a row or column there — outside an edge, or by a gap to fill it in.';
+    board = gridHtml(blank, placeOpts(blank, t));
   } else if (R.target === 'line') {
     how = 'Click ✕ by the row or column to delete.';
     const rows = liveLines(state, 'row').length > 3, cols = liveLines(state, 'col').length > 3;
@@ -1191,6 +1219,7 @@ $('panel').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.cell !== undefined) act({ type: 'move', cell: b.dataset.cell });
+  else if (b.dataset.place !== undefined) act({ type: 'place', target: JSON.parse(b.dataset.place) });
   else if (b.dataset.rulecard !== undefined) {
     ruleDraft.type = b.dataset.rulecard;
     render();
@@ -1207,6 +1236,28 @@ $('panel').addEventListener('click', (e) => {
   else if (b.dataset.forcedraw !== undefined) act({ type: 'forcedraw' });
   else if (b.dataset.copy !== undefined) copyInvite();
   else if (b.dataset.home !== undefined) leaveGame();
+});
+
+// Hovering a ＋ shows where its row or column would go.
+function previewLine(b, on) {
+  const board = b.closest('.board');
+  if (!board) return;
+  board.querySelectorAll('.cell.preview').forEach((el) => el.classList.remove('preview'));
+  if (!on) return;
+  const [axis, i] = b.dataset.line.split(':'), g = state.grid;
+  board.querySelectorAll('.cell[data-k]').forEach((el) => {
+    const [r, c] = unkey(el.dataset.k);
+    const hit = axis === 'row' ? r === +i && c >= 0 && c < g.cols : c === +i && r >= 0 && r < g.rows;
+    el.classList.toggle('preview', hit);
+  });
+}
+$('panel').addEventListener('mouseover', (e) => {
+  const b = e.target.closest('[data-line]');
+  if (b) previewLine(b, true);
+});
+$('panel').addEventListener('mouseout', (e) => {
+  const b = e.target.closest('[data-line]');
+  if (b) previewLine(b, false);
 });
 
 // Pick up where we left off if this page was reloaded mid-game.

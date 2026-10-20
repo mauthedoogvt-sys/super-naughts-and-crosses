@@ -238,6 +238,11 @@ button.cell.off:not(:disabled):hover { border-color: var(--muted); }
   font-weight: 700;
   color: var(--accent);
 }
+/* Where a row or column would go, while hovering its ＋. */
+.cell.preview, span.cell.off.preview {
+  border: 2px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
 .picker { margin: 8px 0; }
 .picker .board { width: min(100%, calc(var(--n) * 64px)); }
 .picker .board.edged { width: min(100%, calc(var(--n) * 64px + 4.4rem)); }

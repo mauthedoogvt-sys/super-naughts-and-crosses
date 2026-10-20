@@ -19,7 +19,8 @@ function randInt(n) {
 // A grid of rows × cols that rules can grow and shrink. Squares are keyed
 // "r,c" and can lie outside the grid. A row or column deleted from the middle
 // stays behind as a gap of dead squares, splitting the board; each round one
-// gap square is drawn to be a wildcard. Tiles a Shift pushes off the grid
+// gap square is drawn to be a wildcard. A row or column added later is whole
+// even where it crosses a gap, and one added over a gap fills it back in. Tiles a Shift pushes off the grid
 // stay where they land but only count for diagonals. Wildcard squares (on the
 // grid or off it) count as X and O, but a line can use only one wildcard.
 
@@ -27,7 +28,19 @@ const key = (r, c) => `${r},${c}`;
 const unkey = (k) => k.split(',').map(Number);
 
 function newGrid() {
-  return { rows: 3, cols: 3, gapRows: [], gapCols: [] };
+  return { rows: 3, cols: 3, dead: [] }; // dead: gap squares, "r,c"
+}
+
+// Games saved when gaps were whole rows and columns.
+function upgradeGrid(s) {
+  const g = s && s.grid;
+  if (!g || g.dead) return;
+  g.dead = [];
+  for (let r = 0; r < g.rows; r++) {
+    for (let c = 0; c < g.cols; c++) if (g.gapRows.includes(r) || g.gapCols.includes(c)) g.dead.push(key(r, c));
+  }
+  delete g.gapRows;
+  delete g.gapCols;
 }
 
 function inRect(g, r, c) {
@@ -35,7 +48,7 @@ function inRect(g, r, c) {
 }
 
 function isGap(g, r, c) {
-  return inRect(g, r, c) && (g.gapRows.includes(r) || g.gapCols.includes(c));
+  return inRect(g, r, c) && g.dead.includes(key(r, c));
 }
 
 // On the grid and not in a gap (wildcard squares included).
@@ -58,10 +71,16 @@ function rectKeys(s) {
 const gridSquares = (s) => rectKeys(s).filter((k) => onGrid(s, k));
 const emptyKeys = (s) => rectKeys(s).filter((k) => playable(s, k) && !s.board[k]);
 
-// The rows (or columns) that aren't gaps.
+// The squares of row (or column) i, across the grid.
+function lineKeys(g, axis, i) {
+  const n = axis === 'row' ? g.cols : g.rows;
+  return [...Array(n).keys()].map((j) => (axis === 'row' ? key(i, j) : key(j, i)));
+}
+
+// The rows (or columns) that aren't all gap.
 function liveLines(s, axis) {
-  const g = s.grid, n = axis === 'row' ? g.rows : g.cols, gaps = axis === 'row' ? g.gapRows : g.gapCols;
-  return [...Array(n).keys()].filter((i) => !gaps.includes(i));
+  const g = s.grid, n = axis === 'row' ? g.rows : g.cols;
+  return [...Array(n).keys()].filter((i) => lineKeys(g, axis, i).some((k) => !g.dead.includes(k)));
 }
 
 function lineLabel(s, axis, i) {
@@ -100,28 +119,55 @@ function moveAll(s, dr, dc) {
   s.wilds = s.wilds.map(mv);
   s.curses.forEach((x) => { x.key = mv(x.key); });
   s.board = Object.fromEntries(Object.entries(s.board).map(([k, t]) => [mv(k), t]));
-  s.grid.gapRows = s.grid.gapRows.map((r) => r + dr);
-  s.grid.gapCols = s.grid.gapCols.map((c) => c + dc);
+  s.grid.dead = s.grid.dead.map(mv);
 }
 
-// Cuts off gap rows and columns at the edges of the grid, and anything lying
-// in line with them.
+// Cuts off rows and columns at the edges of the grid that are all gap, and
+// anything lying in line with them.
 function trimGaps(s) {
   const g = s.grid;
+  const dead = (axis, i) => !liveLines(s, axis).includes(i);
   const drop = (axis, i) => {
-    const at = (k) => unkey(k)[axis === 'row' ? 0 : 1];
-    s.wilds = s.wilds.filter((k) => at(k) !== i);
-    s.curses = s.curses.filter((x) => at(x.key) !== i);
-    if (axis === 'row') { g.gapRows = g.gapRows.filter((r) => r !== i); g.rows--; }
-    else { g.gapCols = g.gapCols.filter((c) => c !== i); g.cols--; }
+    const off = (k) => unkey(k)[axis === 'row' ? 0 : 1] !== i;
+    s.wilds = s.wilds.filter(off);
+    s.curses = s.curses.filter((x) => off(x.key));
+    g.dead = g.dead.filter(off);
+    if (axis === 'row') g.rows--;
+    else g.cols--;
   };
   for (let again = true; again;) {
-    if (g.gapRows.includes(0)) { drop('row', 0); moveAll(s, -1, 0); }
-    else if (g.gapRows.includes(g.rows - 1)) drop('row', g.rows - 1);
-    else if (g.gapCols.includes(0)) { drop('col', 0); moveAll(s, 0, -1); }
-    else if (g.gapCols.includes(g.cols - 1)) drop('col', g.cols - 1);
+    if (dead('row', 0)) { drop('row', 0); moveAll(s, -1, 0); }
+    else if (dead('row', g.rows - 1)) drop('row', g.rows - 1);
+    else if (dead('col', 0)) { drop('col', 0); moveAll(s, 0, -1); }
+    else if (dead('col', g.cols - 1)) drop('col', g.cols - 1);
     else again = false;
   }
+}
+
+// Where a row (or column) can be placed: just outside an edge (index -1, or
+// one past the end), or over one with gap squares in it, to fill them in.
+function canPlace(s, axis, i) {
+  const g = s.grid, n = axis === 'row' ? g.rows : g.cols;
+  if (i === -1 || i === n) return true;
+  return Number.isInteger(i) && i >= 0 && i < n && lineKeys(g, axis, i).some((k) => g.dead.includes(k));
+}
+
+// Places a whole row or column there; returns what happened, or null.
+function placeLine(s, t) {
+  if (!t || (t.axis !== 'row' && t.axis !== 'col') || !canPlace(s, t.axis, t.index)) return null;
+  const g = s.grid, rows = t.axis === 'row', n = rows ? g.rows : g.cols, i = t.index;
+  const what = rows ? 'row' : 'column';
+  if (i === -1) {
+    if (rows) { g.rows++; moveAll(s, 1, 0); } else { g.cols++; moveAll(s, 0, 1); }
+    return `added a ${what} ${rows ? 'on top' : 'on the left'}`;
+  }
+  if (i === n) {
+    if (rows) g.rows++; else g.cols++;
+    return `added a ${what} ${rows ? 'on the bottom' : 'on the right'}`;
+  }
+  const fill = lineKeys(g, t.axis, i);
+  g.dead = g.dead.filter((k) => !fill.includes(k));
+  return `filled in ${lineLabel(s, t.axis, i)}`;
 }
 
 // Pushes every tile in a row or column one square along.
@@ -144,7 +190,7 @@ function shiftLabel(s, e) {
 // ---- Rules ----------------------------------------------------------------
 // Whoever wins a round picks one of three rules drawn at random. Each has:
 //   ok(s, seat)               whether it can be drawn right now
-//   target                    what the player has to pick: 'side', 'line',
+//   target                    what the player has to pick: 'place', 'line',
 //                             'cell', 'wild', 'shift' or nothing
 //   apply(s, seat, target)    puts it into play; returns the line for the
 //                             rules list, or null if the target is no good
@@ -152,15 +198,11 @@ function shiftLabel(s, e) {
 
 const RULES = {
   addLine: {
-    name: 'Add a Line', icon: '➕', target: 'side',
-    desc: 'Add a row or column to an edge of the board, for the rest of the match.',
-    apply(s, seat, side) {
-      const g = s.grid;
-      if (side === 'top') { g.rows++; moveAll(s, 1, 0); return 'Added a row on top'; }
-      if (side === 'bottom') { g.rows++; return 'Added a row on the bottom'; }
-      if (side === 'left') { g.cols++; moveAll(s, 0, 1); return 'Added a column on the left'; }
-      if (side === 'right') { g.cols++; return 'Added a column on the right'; }
-      return null;
+    name: 'Add a Line', icon: '➕', target: 'place',
+    desc: 'Add another row or column to the board, for the rest of the match.',
+    apply(s, seat, t) {
+      const text = placeLine(s, t);
+      return text && text[0].toUpperCase() + text.slice(1);
     },
   },
   delLine: {
@@ -173,7 +215,7 @@ const RULES = {
       if (live.length <= 3 || !live.includes(i)) return null;
       const label = lineLabel(s, t.axis, i), middle = i !== live[0] && i !== live.at(-1);
       // It becomes a gap; gaps that end up at an edge are cut off entirely.
-      (rows ? g.gapRows : g.gapCols).push(i);
+      g.dead = [...new Set([...g.dead, ...lineKeys(g, t.axis, i)])];
       trimGaps(s);
       s.wilds = s.wilds.filter((k) => !isGap(g, ...unkey(k)));
       return middle ? `Deleted ${label} — the board is split` : `Deleted ${label}`;
@@ -499,7 +541,7 @@ function createGame(code) {
   return {
     v: 0,
     code,
-    phase: 'lobby', // lobby | play | duel | rule
+    phase: 'lobby', // lobby | play | duel | place | rule
     players: { x: null, o: null }, // { id, name } of whoever sits there
     watchers: [],                  // [{ id, name }]
     round: 1,
@@ -626,12 +668,12 @@ function endTurn(s, seat) {
   beginTurn(s, other(seat));
 }
 
+// After a round the loser places a row or column, then the winner picks a rule.
 function endRound(s, winner, how) {
   s.roundWinner = winner;
   s.winHow = how;
   s.scores[winner]++;
-  s.offer = drawOffer(s, winner);
-  s.phase = 'rule';
+  s.phase = 'place';
 }
 
 // Applies one person's action. `seat` is 'x', 'o', or null for someone
@@ -649,6 +691,7 @@ function applyAction(s, seat, a, name) {
   switch (a.type) {
     case 'move': return move(s, seat, a.cell);
     case 'pick': return pick(s, seat, a.value);
+    case 'place': return place(s, seat, a.target, name);
     case 'rule': return addRule(s, seat, a.rule, a.target, name);
     case 'rematch': return rematch(s, seat);
   }
@@ -729,6 +772,17 @@ function advance(s) {
   } else {
     nextDuel(s.duel);
   }
+  return true;
+}
+
+// The round's loser places a row or column on the board.
+function place(s, seat, target, name) {
+  if (s.phase !== 'place' || other(s.roundWinner) !== seat) return false;
+  const text = placeLine(s, target);
+  if (!text) return false;
+  note(s, `${name} ${text}.`);
+  s.offer = drawOffer(s, s.roundWinner);
+  s.phase = 'rule';
   return true;
 }
 
