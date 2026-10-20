@@ -65,6 +65,8 @@ function joinGame(code) {
 function resumeGame(saved) {
   session = { code: saved.code, role: saved.role };
   state = saved.state;
+  // Saved mid-tiebreaker by an older version of the game: start the bonus games afresh.
+  if (session.role === 'host' && state.phase === 'duel' && !state.duel.queue) startDuel(state);
   start();
 }
 
@@ -76,6 +78,7 @@ function start() {
   $('game').hidden = false;
   lastChatKey = lastPanel = null;
   openPeer();
+  if (session.role === 'host') scheduleAdvance();
   render();
 }
 
@@ -93,6 +96,8 @@ function leaveGame() {
 
 function shutdown() {
   clearTimeout(retryTimer);
+  clearTimeout(advanceTimer);
+  advanceFor = null;
   store.del(SAVE_KEY);
   connected = false;
   conn = null;
@@ -330,7 +335,25 @@ function commit() {
   state.v++;
   save();
   send({ t: 'state', state: viewFor(state, 'guest') });
+  scheduleAdvance();
   render();
+}
+
+// Once a bonus game is revealed, the host moves both players on after the
+// reveal has had time to play.
+let advanceTimer = null, advanceFor = null;
+function scheduleAdvance() {
+  const d = state.phase === 'duel' && state.duel.result ? state.duel : null;
+  const id = d ? d.id : null;
+  if (id === advanceFor) return;
+  clearTimeout(advanceTimer);
+  advanceFor = id;
+  if (d) {
+    advanceTimer = setTimeout(() => {
+      advanceFor = null;
+      hostApply('host', { type: 'advance' });
+    }, DUELS[d.type].revealMs);
+  }
 }
 
 function hostApply(role, a) {
@@ -423,15 +446,172 @@ function boardHtml(clickable, small) {
   }).join('')}</div>`;
 }
 
-function duelHistoryHtml() {
-  if (!state.duel || !state.duel.history.length) return '';
+// Earlier bonus games this round. The one being revealed right now is left
+// out so the list doesn't spoil it.
+function duelHistoryHtml(skipCurrent) {
+  if (!state.duel) return '';
+  const past = state.duel.history.slice(0, skipCurrent && state.duel.result ? -1 : undefined);
+  if (!past.length) return '';
   const n = { host: nameOf('host'), guest: nameOf('guest') };
-  return `<ol class="duel-history">${state.duel.history.map((e) => {
+  return `<ol class="duel-history">${past.map((e) => {
     const g = DUELS[e.type];
-    const result = e.winner ? `<b>${nameOf(e.winner)} wins!</b>` : '<b>Tie!</b>';
+    if (!g) return '';
+    const result = e.winner ? `<b>${nameOf(e.winner)} wins!</b>` : '<b>Draw!</b>';
     return `<li><span class="dname">${g.name}</span> ${g.describe(e, n)} ${result}</li>`;
   }).join('')}</ol>`;
 }
+
+// ---- Bonus games on the board ----
+// The board is replaced by an arena: the opponent's side on top, a status
+// strip in the middle and your side at the bottom. When a game is revealed,
+// CSS animations play the countdown and reveal (see .early / .late in
+// style.css), so nothing here needs a timer.
+
+let mlDraft = { id: null, words: [] }; // your Mad Libs words before you submit them
+
+function duelHtml() {
+  const mine = session.role, opp = other(mine);
+  const d = viewFor(state, mine).duel, g = DUELS[d.type];
+  const first = d.history.length === (d.result ? 1 : 0);
+  const sides = ARENAS[d.type](d, mine, opp);
+  return `<h2>${first ? "It's a draw!" : 'Still a draw!'} Bonus game: ${g.name}</h2>
+    <p class="hint">${g.prompt}</p>
+    <div class="arena arena-${d.type}" style="--d: ${g.countdown ? 3 : 0}s">
+      <div class="side ${opp}"><span class="who">${nameOf(opp)}</span>${sides.opp}</div>
+      <div class="centre">${centreHtml(d, mine, opp, g)}</div>
+      <div class="side ${mine}"><span class="who">You</span>${sides.me}</div>
+    </div>
+    ${duelHistoryHtml(true)}`;
+}
+
+function centreHtml(d, mine, opp, g) {
+  if (!d.result) {
+    const writing = d.type === 'madlibs' && !d.data.pairs;
+    const done = writing ? d.data.fills[opp] !== null : d.picks[opp] !== null;
+    return done
+      ? `<span class="ready">✔ ${nameOf(opp)} has ${writing ? 'finished their sentence' : 'chosen'}</span>`
+      : `<span class="waiting">${nameOf(opp)} is ${writing ? 'writing' : 'choosing'}<span class="dots"></span></span>`;
+  }
+  const w = d.result.winner;
+  const text = w === mine ? '<b class="you-win">You win! 🎉</b>'
+    : w ? `<b class="they-win">${nameOf(w)} wins</b>`
+    : `<b class="draw-text">🤝 Draw!</b><span class="draw-why">${drawWhy(d)}</span>
+       <span class="hint">Nobody wins this one — another bonus game is coming…</span>`;
+  const count = g.countdown
+    ? '<div class="count early"><span>3</span><span>2</span><span>1</span></div>'
+    : '';
+  return `<div class="stack">${count}<div class="${d.type === 'coin' ? 'later' : 'late'} ${w ? '' : 'draw-box'}">${text}</div></div>`;
+}
+
+function drawWhy(d) {
+  if (d.type === 'rps') return `You both threw ${RPS_EMOJI[d.picks.host]}`;
+  return d.result.info.right.host ? 'You were both right' : 'You were both wrong';
+}
+
+// Shows `before` until the reveal, then swaps in `after`.
+const reveal = (before, after) =>
+  `<div class="stack"><div class="early">${before}</div><div class="late">${after}</div></div>`;
+
+const yesNo = (ok) => (ok ? '<span class="right">✔ right</span>' : '<span class="wrong">✘ wrong</span>');
+
+const ARENAS = {
+  rps(d, mine, opp) {
+    const big = (p) => `<span class="big">${RPS_EMOJI[p]}</span><span class="hint">${p}</span>`;
+    const me = d.picks[mine] === null
+      ? `<div class="choices">${DUELS.rps.options.map((o) =>
+          `<button class="emoji-btn" data-pick="${o}" title="${o}">${RPS_EMOJI[o]}</button>`).join('')}</div>`
+      : big(d.picks[mine]);
+    const hidden = '<span class="big">❔</span>';
+    return { me, opp: d.result ? reveal(hidden, big(d.picks[opp])) : hidden };
+  },
+
+  coin(d, mine, opp) {
+    const blank = '<div class="coin"><span class="face">?</span></div>';
+    const coin = (r) => `<div class="coin flip-${d.result.info.flips[r]}">
+      <span class="face heads">H</span><span class="face tails">T</span></div>`;
+    const called = (r) => {
+      const call = d.picks[r], flip = d.result && d.result.info.flips[r];
+      const after = d.result ? `<span class="later"> — landed ${flip}, ${yesNo(call === flip)}</span>` : '';
+      return `<span class="hint">${r === mine ? 'You' : nameOf(r)} called <b>${call}</b>${after}</span>`;
+    };
+    const me = d.picks[mine] === null
+      ? `${blank}<div class="choices">
+          <button class="primary" data-pick="heads">Heads</button>
+          <button class="primary" data-pick="tails">Tails</button></div>`
+      : `${d.result ? reveal(blank, coin(mine)) : blank}${called(mine)}`;
+    const theirs = d.result ? `${reveal(blank, coin(opp))}<span class="late">${called(opp)}</span>` : blank;
+    return { me, opp: theirs };
+  },
+
+  cards(d, mine, opp) {
+    const hands = d.data.hands; // null until the reveal
+    // owner's hand, which grabber picks from
+    const row = (owner, grabber) => `<div class="cardrow">${[0, 1, 2].map((i) => {
+      const shown = d.picks[grabber] === String(i) && (hands || grabber === mine);
+      const tag = shown ? `<span class="grab-tag">${grabber === mine ? 'you' : nameOf(grabber)}</span>` : '';
+      const canGrab = owner === opp && d.picks[mine] === null;
+      return `<button class="pcard ${hands ? hands[owner][i] : 'back'} ${shown ? 'grabbed' : ''}"
+        ${canGrab ? `data-pick="${i}"` : 'disabled'}>${tag}</button>`;
+    }).join('')}</div>`;
+    const result = (r) => {
+      const got = DUELS.cards.grabbed(d, r);
+      return `<span class="hint">${r === mine ? 'You' : nameOf(r)} grabbed ${got} ${yesNo(got === CARD_COLOURS[r])}</span>`;
+    };
+    const goal = `<span class="hint">Grab the <b class="${mine}">${CARD_COLOURS[mine]}</b> card from ${nameOf(opp)}’s hand</span>`;
+    const yours = `<span class="hint">Your hand — ${nameOf(opp)} is after the <b class="${opp}">${CARD_COLOURS[opp]}</b> one</span>`;
+    return {
+      opp: `${row(opp, mine)}${hands ? result(mine) : goal}`,
+      me: `${row(mine, opp)}${hands ? result(opp) : yours}`,
+    };
+  },
+
+  dice(d, mine, opp) {
+    const rolls = d.data.rolls;
+    // Only roll the dice when they first appear, not on every redraw.
+    const fresh = d.picks.host === null && d.picks.guest === null;
+    const die = (n, rolling) => `<span class="die ${rolling ? 'rolling' : ''}">${DICE_FACES[n - 1]}</span>`;
+    const right = (r) => (d.picks[r] === 'higher' ? rolls[r] > rolls[other(r)] : rolls[r] < rolls[other(r)]);
+    let me = `${die(rolls[mine], fresh)}<span class="hint">You rolled ${rolls[mine]}</span>`;
+    me += d.picks[mine] === null
+      ? `<div class="choices">
+          <button class="primary" data-pick="higher">⬆ Higher</button>
+          <button class="primary" data-pick="lower">⬇ Lower</button></div>`
+      : `<span class="hint">You said <b>${d.picks[mine]}</b> ${d.result ? yesNo(right(mine)) : ''}</span>`;
+    const theirs = d.result
+      ? `${die(rolls[opp], true)}<span class="hint">${nameOf(opp)} rolled ${rolls[opp]} and said <b>${d.picks[opp]}</b> ${yesNo(right(opp))}</span>`
+      : '<span class="die hidden-die">?</span>';
+    return { me, opp: theirs };
+  },
+
+  madlibs(d, mine, opp) {
+    const lib = MADLIBS[d.data.lib], fills = d.data.fills, ml = DUELS.madlibs;
+    const text = (words) => esc(madlibText(lib, words.map((w) => w || '_____')));
+    let me;
+    if (fills[mine] === null) {
+      if (mlDraft.id !== d.id) mlDraft = { id: d.id, words: lib.words.map(() => null) };
+      const rows = lib.words.map((ws, i) => `<div class="choices words">${ws.map((w) =>
+        `<button class="${mlDraft.words[i] === w ? 'chosen' : ''}" data-word="${i}" data-w="${esc(w)}">${esc(w)}</button>`
+      ).join('')}</div>`).join('');
+      me = `<p class="sentence">${text(mlDraft.words)}</p>${rows}
+        <button class="primary" data-mlsubmit ${mlDraft.words.every(Boolean) ? '' : 'disabled'}>Submit sentence</button>`;
+    } else if (!d.data.pairs) {
+      me = `<p class="sentence">${text(fills[mine])}</p><span class="hint">Sent. Waiting for ${nameOf(opp)}…</span>`;
+    } else {
+      const myPick = d.picks[mine];
+      me = `<b>Which one did the computer write?</b>${d.data.pairs[mine].map((p, i) => {
+        if (myPick === null) return `<button class="sentence-btn" data-pick="${i}">${text(p.words)}</button>`;
+        const tag = d.result ? `<span class="tag">${p.comp ? '🤖 Computer' : `✍ ${nameOf(opp)}`}</span>` : '';
+        return `<div class="sentence-btn ${myPick === String(i) ? 'chosen' : ''}">${tag}${text(p.words)}</div>`;
+      }).join('')}`;
+      if (d.result) me += `<span class="hint">You ${ml.spotted(d, mine) ? 'spotted the computer' : 'were fooled'} ${yesNo(ml.spotted(d, mine))}</span>`;
+    }
+    const theirs = d.result
+      ? `<span class="hint">${nameOf(opp)} had your sentence to tell apart from the computer’s, and
+          ${ml.spotted(d, opp) ? 'spotted the computer' : 'was fooled'} ${yesNo(ml.spotted(d, opp))}</span>`
+      : '<span class="big">✍️</span>';
+    return { me, opp: theirs };
+  },
+};
 
 function panelHtml() {
   const mine = session.role, opp = other(mine);
@@ -458,25 +638,12 @@ function panelHtml() {
     return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${boardHtml(myTurn, false)}`;
   }
 
-  if (state.phase === 'duel') {
-    const d = state.duel, g = DUELS[d.type];
-    const myPick = d.picks[mine], oppPicked = d.picks[opp] !== null;
-    const choices = myPick === null
-      ? `<div class="choices">${g.options.map((o) =>
-          `<button class="primary" data-pick="${esc(o)}">${esc(g.labels[o] || o)}</button>`).join('')}</div>`
-      : `<p>You picked <b>${esc(g.labels[myPick] || myPick)}</b>.</p>`;
-    return `${boardHtml(false, true)}
-      <h2>${d.history.length ? 'Still tied!' : "It's a draw!"} Tiebreaker ${d.history.length + 1}: ${g.name}</h2>
-      ${duelHistoryHtml()}
-      <p>${g.prompt}</p>
-      ${choices}
-      <p class="hint">${oppPicked ? `${nameOf(opp)} has made their choice.` : `${nameOf(opp)} is choosing…`}</p>`;
-  }
+  if (state.phase === 'duel') return duelHtml();
 
   if (state.phase === 'rule') {
     const w = state.roundWinner;
     const head = w === mine ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
-    const how = state.winHow === 'line' ? 'Three in a row.' : 'Decided by tiebreaker.';
+    const how = state.winHow === 'line' ? 'Three in a row.' : 'Decided by bonus game.';
     const form = w === mine
       ? `<form id="rule-form">
           <label for="rule-text">Add a rule for the rest of the match:</label>
@@ -488,7 +655,7 @@ function panelHtml() {
           <p class="hint">Rules are on the honour system for now — the game doesn't enforce them yet.</p>
         </form>`
       : `<p>Waiting for ${nameOf(w)} to add a rule…</p>`;
-    return `<h2>${head}</h2><p>${how}</p>${boardHtml(false, true)}${duelHistoryHtml()}${form}`;
+    return `<h2>${head}</h2><p>${how}</p>${boardHtml(false, true)}${duelHistoryHtml(false)}${form}`;
   }
   return '';
 }
@@ -567,6 +734,10 @@ $('panel').addEventListener('click', (e) => {
   if (!b) return;
   if (b.dataset.cell !== undefined) act({ type: 'move', cell: +b.dataset.cell });
   else if (b.dataset.pick !== undefined) act({ type: 'pick', value: b.dataset.pick });
+  else if (b.dataset.word !== undefined) {
+    mlDraft.words[+b.dataset.word] = b.dataset.w;
+    render();
+  } else if (b.dataset.mlsubmit !== undefined) act({ type: 'pick', value: mlDraft.words.slice() });
   else if (b.dataset.skip !== undefined) act({ type: 'rule', text: '' });
   else if (b.dataset.copy !== undefined) copyInvite();
   else if (b.dataset.home !== undefined) leaveGame();
