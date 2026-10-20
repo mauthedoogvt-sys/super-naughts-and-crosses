@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- Upload this file to Neocities as Games/SuperOX/index.html. Free Neocities
+     sites can't connect to the game server, so the game itself lives on GitHub
+     Pages and this page just shows it in a frame. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Super Naughts &amp; Crosses</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #17181b; }
+    iframe { display: block; width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <iframe id="game" title="Super Naughts &amp; Crosses" allow="clipboard-write"></iframe>
+  <script>
+    // Pass an invite code (#ABCD) through to the game.
+    var GAME_URL = 'https://mauthedoogvt-sys.github.io/super-naughts-and-crosses/';
+    document.getElementById('game').src = GAME_URL + location.hash;
+  </script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Super Naughts &amp; Crosses</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="home" class="screen" hidden>
+    <h1>Super Naughts <span>&amp;</span> Crosses</h1>
+
+    <div id="resume" class="card" hidden>
+      <p>You have a game in progress: <b id="resume-code"></b></p>
+      <div class="row">
+        <button id="resume-btn" class="primary">Resume</button>
+        <button id="discard-btn">Forget it</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <label for="name">Your name</label>
+      <input id="name" maxlength="20" placeholder="Player" autocomplete="nickname">
+    </div>
+
+    <div class="card">
+      <button id="host-btn" class="primary wide">Host a new game</button>
+    </div>
+
+    <div class="card">
+      <form id="join-form">
+        <label for="join-code">Join with a code</label>
+        <div class="row">
+          <input id="join-code" maxlength="4" placeholder="ABCD" autocapitalize="characters" autocomplete="off" spellcheck="false">
+          <button class="primary">Join</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="game" class="screen" hidden>
+    <header>
+      <button id="code-btn" class="code" title="Copy invite link"></button>
+      <span id="status" class="pill"></span>
+      <button id="reconnect-btn" hidden>Reconnect</button>
+      <button id="leave-btn" class="ghost">Leave</button>
+    </header>
+
+    <div id="scores" class="scores"></div>
+
+    <div class="layout">
+      <main id="panel" class="card"></main>
+      <aside>
+        <section class="card">
+          <h3>Rules</h3>
+          <ol id="rules"></ol>
+        </section>
+        <section class="card chat">
+          <h3>Chat</h3>
+          <div id="chat-log"></div>
+          <form id="chat-form" class="row">
+            <input id="chat-input" maxlength="200" placeholder="Say something…" autocomplete="off">
+            <button>Send</button>
+          </form>
+        </section>
+        <button id="rematch-btn" class="wide" hidden>Rematch</button>
+      </aside>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+
+  <script src="vendor/peerjs.min.js"></script> <!-- PeerJS 1.5.4, MIT -->
+  <script src="game.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
