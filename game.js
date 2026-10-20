@@ -291,8 +291,18 @@ function applyAction(s, role, a) {
     case 'rule': return addRule(s, role, a.text);
     case 'rematch': return rematch(s, role);
     case 'chat': return chat(s, role, a.text);
+    case 'quickdraw': return quickDraw(s);
   }
   return false;
+}
+
+// Testing aid: fills the board with a drawn position and goes straight to the
+// bonus games.
+function quickDraw(s) {
+  if (s.phase !== 'play') return false;
+  s.board = ['host', 'guest', 'host', 'host', 'guest', 'guest', 'guest', 'host', 'host'];
+  startDuel(s);
+  return true;
 }
 
 function move(s, role, cell) {

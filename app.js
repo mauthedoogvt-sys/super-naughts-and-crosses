@@ -1,18 +1,23 @@
 // Networking (PeerJS) and the page. The host's browser registers the peer ID
 // PEER_PREFIX + code on PeerJS's free public server; the guest connects to it.
-// Both save the game to localStorage after every change so either can reload
-// and reconnect.
+// Both save the game after every change so either can reload and reconnect:
+// to sessionStorage, so a reloaded tab gets back its own game even when the
+// other player is in another tab of the same browser, and to localStorage
+// (one slot per role) so the game can be resumed after closing the tab.
 
 const PEER_PREFIX = 'supernac-';
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const SAVE_KEY = 'snc-save', ID_KEY = 'snc-id', NAME_KEY = 'snc-name';
 const HEARTBEAT_MS = 3000, TIMEOUT_MS = 15000, RETRY_MS = 3000;
 
-const store = {
-  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
-  del(k) { try { localStorage.removeItem(k); } catch {} },
-};
+function makeStore(area) {
+  return {
+    get(k) { try { return JSON.parse(window[area].getItem(k)); } catch { return null; } },
+    set(k, v) { try { window[area].setItem(k, JSON.stringify(v)); } catch {} },
+    del(k) { try { window[area].removeItem(k); } catch {} },
+  };
+}
+const store = makeStore('localStorage'), tabStore = makeStore('sessionStorage');
 
 const me = { id: store.get(ID_KEY), name: store.get(NAME_KEY) || '' };
 if (!me.id) {
@@ -37,7 +42,24 @@ function newCode() {
 }
 
 function save() {
-  store.set(SAVE_KEY, { code: session.code, role: session.role, state });
+  const data = { code: session.code, role: session.role, state };
+  tabStore.set(SAVE_KEY, data);
+  store.set(`${SAVE_KEY}-${session.role}`, data);
+}
+
+// This tab's own game if it has one, otherwise the most likely game to resume
+// (the host's copy is the real one). 'snc-save' in localStorage is where
+// older versions kept it.
+function loadSave() {
+  return tabStore.get(SAVE_KEY) || store.get(`${SAVE_KEY}-host`) ||
+    store.get(`${SAVE_KEY}-guest`) || store.get(SAVE_KEY);
+}
+
+function deleteSave(saved) {
+  tabStore.del(SAVE_KEY);
+  for (const k of [`${SAVE_KEY}-${saved.role}`, SAVE_KEY]) {
+    if (store.get(k)?.code === saved.code) store.del(k);
+  }
 }
 
 // ---- Starting and leaving -------------------------------------------------
@@ -98,7 +120,7 @@ function shutdown() {
   clearTimeout(retryTimer);
   clearTimeout(advanceTimer);
   advanceFor = null;
-  store.del(SAVE_KEY);
+  deleteSave(session);
   connected = false;
   conn = null;
   if (peer) peer.destroy();
@@ -635,7 +657,8 @@ function panelHtml() {
     const turn = myTurn
       ? `Your turn — you're <b>${MARKS[mine]}</b>.`
       : `Waiting for ${nameOf(opp)} (${MARKS[opp]})…`;
-    return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${boardHtml(myTurn, false)}`;
+    return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${boardHtml(myTurn, false)}
+      <button class="ghost test-btn" data-quickdraw title="Testing: skip to a drawn board">Quick draw (test)</button>`;
   }
 
   if (state.phase === 'duel') return duelHtml();
@@ -693,7 +716,7 @@ function showHome() {
   $('game').hidden = true;
   $('home').hidden = false;
   $('name').value = me.name;
-  const saved = store.get(SAVE_KEY);
+  const saved = loadSave();
   $('resume').hidden = !saved;
   if (saved) $('resume-code').textContent = saved.code;
   const hashCode = location.hash.slice(1).toUpperCase();
@@ -707,10 +730,10 @@ $('join-form').onsubmit = (e) => {
   if (code.length !== 4) return toast('Codes are 4 characters long.');
   joinGame(code);
 };
-$('resume-btn').onclick = () => resumeGame(store.get(SAVE_KEY));
+$('resume-btn').onclick = () => resumeGame(loadSave());
 $('discard-btn').onclick = () => {
   if (!confirm('Forget this game?')) return;
-  store.del(SAVE_KEY);
+  deleteSave(loadSave());
   showHome();
 };
 $('code-btn').onclick = copyInvite;
@@ -739,6 +762,7 @@ $('panel').addEventListener('click', (e) => {
     render();
   } else if (b.dataset.mlsubmit !== undefined) act({ type: 'pick', value: mlDraft.words.slice() });
   else if (b.dataset.skip !== undefined) act({ type: 'rule', text: '' });
+  else if (b.dataset.quickdraw !== undefined) act({ type: 'quickdraw' });
   else if (b.dataset.copy !== undefined) copyInvite();
   else if (b.dataset.home !== undefined) leaveGame();
 });
@@ -749,7 +773,7 @@ $('panel').addEventListener('submit', (e) => {
 });
 
 // Pick up where we left off if this page was reloaded mid-game.
-const saved = store.get(SAVE_KEY);
+const saved = loadSave();
 const hashCode = location.hash.slice(1).toUpperCase();
 if (saved && saved.code === hashCode) resumeGame(saved);
 else showHome();

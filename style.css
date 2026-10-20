@@ -198,6 +198,7 @@ header {
 .turn { font-size: 1.1rem; }
 .turn.mine { font-weight: 700; }
 .flip { margin: 0; }
+.test-btn { font-size: 0.8rem; opacity: 0.6; }
 
 /* ---- Tiebreakers ---- */
 
