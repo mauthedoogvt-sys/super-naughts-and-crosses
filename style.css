@@ -225,6 +225,20 @@ button.cell.off:not(:disabled):hover { border-color: var(--muted); }
 }
 .cell.wild { background: color-mix(in srgb, #9b59d0 18%, var(--card)); border-color: #9b59d0; }
 .cell.wild .star { color: #9b59d0; }
+/* A wildcard still waiting: a faded star with the turns left on it. */
+.cell.waiting .star { opacity: 0.45; }
+.cell .wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 0.12em;
+  font-size: 0.45em;
+  font-weight: 900;
+  color: #fff;
+  text-shadow: 0 0 3px #4a1f73, 0 0 3px #4a1f73;
+}
 /* A wildcard used up in the winning line, shown until the next round. */
 .cell.spent .star { color: #9b59d0; opacity: 0.4; text-decoration: line-through; }
 .cell.spent.win { background: var(--win); }

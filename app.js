@@ -147,6 +147,7 @@ function resumeGame(saved) {
   session = { code: saved.code, role: saved.role, id: saved.id };
   state = saved.state;
   upgradeGrid(state);
+  upgradeWilds(state);
   start();
 }
 
@@ -707,6 +708,7 @@ function square(s, r, c) {
     kind: !inRect(g, r, c) ? 'off' : isGap(g, r, c) ? 'gap' : 'play',
     tile: s.board[k] || null,
     wild: s.wilds.includes(k),
+    wait: (s.wildWait || {})[k] || 0,
     spent: (s.spent || []).includes(k),
     win: !!s.winLine?.includes(k),
     curse: s.curses.some((x) => x.key === k), // only ever seen by people watching
@@ -715,8 +717,10 @@ function square(s, r, c) {
 
 function squareHtml(sq, attrs) {
   if (sq.kind === 'off' && !sq.tile && !sq.wild && !sq.spent && !attrs) return `<span class="cell off" data-k="${sq.k}"></span>`;
-  const cls = ['cell', sq.kind, sq.wild && 'wild', sq.spent && 'spent', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
-  const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>` : sq.wild || sq.spent ? '<span class="star">★</span>' : '';
+  const cls = ['cell', sq.kind, sq.wild && 'wild', sq.wait && 'waiting', sq.spent && 'spent', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
+  const wait = sq.wait ? `<span class="wait" title="Ready in ${sq.wait} turn${sq.wait === 1 ? '' : 's'}">${sq.wait}</span>` : '';
+  const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>`
+    : sq.wild || sq.spent ? `<span class="star">★</span>${wait}` : '';
   return `<button class="${cls}" data-k="${sq.k}" ${attrs || 'disabled'}>${inner}</button>`;
 }
 
@@ -1050,7 +1054,8 @@ function roundRulesHtml() {
 function roundOverHtml() {
   const w = state.roundWinner;
   const head = w === mySeat() ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
-  const how = { line: 'Three in a row.', shift: 'Three in a row, thanks to the Shift.', duel: 'Decided by bonus game.' }[state.winHow];
+  const how = { line: 'Three in a row.', shift: 'Three in a row, thanks to the Shift.',
+    wild: 'Three in a row, thanks to a wildcard becoming ready.', duel: 'Decided by bonus game.' }[state.winHow];
   return `<h2>${head}</h2><p>${how}</p>`;
 }
 

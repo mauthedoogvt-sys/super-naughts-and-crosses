@@ -24,7 +24,8 @@ function randInt(n) {
 // crosses a gap, and one added over a gap fills it back in. Tiles a Shift pushes off the grid
 // stay where they land but only count for diagonals. Wildcard squares (on the
 // grid or off it) count as X and O, but a line can use only one wildcard, and
-// a wildcard in a winning line is used up.
+// a wildcard in a winning line is used up. A new wildcard only starts counting
+// after a random number of turns (s.wildWait has how many are left).
 
 const key = (r, c) => `${r},${c}`;
 const unkey = (k) => k.split(',').map(Number);
@@ -43,6 +44,11 @@ function upgradeGrid(s) {
   }
   delete g.gapRows;
   delete g.gapCols;
+}
+
+// Saved games from before wildcards had to wait.
+function upgradeWilds(s) {
+  if (s && !s.wildWait) s.wildWait = {};
 }
 
 function inRect(g, r, c) {
@@ -93,7 +99,7 @@ function lineLabel(s, axis, i) {
 function worth(s, k, seat, diagonal) {
   const t = s.board[k];
   if (t) return t === seat && (diagonal || onGrid(s, k)) ? 'tile' : null;
-  return s.wilds.includes(k) ? 'wild' : null;
+  return s.wilds.includes(k) && !s.wildWait[k] ? 'wild' : null;
 }
 
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
@@ -118,6 +124,7 @@ function findLine(s, seat) {
 function moveAll(s, dr, dc) {
   const mv = (k) => { const [r, c] = unkey(k); return key(r + dr, c + dc); };
   s.wilds = s.wilds.map(mv);
+  s.wildWait = Object.fromEntries(Object.entries(s.wildWait).map(([k, n]) => [mv(k), n]));
   s.spent = (s.spent || []).map(mv);
   if (s.winLine) s.winLine = s.winLine.map(mv);
   s.curses.forEach((x) => { x.key = mv(x.key); });
@@ -184,6 +191,26 @@ function shiftLine(s, e) {
   s.board = board;
 }
 
+// A new wildcard, which starts counting after 1–6 turns.
+function addWild(s, k) {
+  if (s.wilds.includes(k)) return;
+  s.wilds.push(k);
+  s.wildWait[k] = randInt(6) + 1;
+}
+
+// Every turn taken counts down the wildcards still waiting. Returns true if
+// any became ready.
+function wakeWilds(s) {
+  let woke = false;
+  for (const k of Object.keys(s.wildWait)) {
+    if (--s.wildWait[k] > 0) continue;
+    delete s.wildWait[k];
+    woke = true;
+  }
+  if (woke) announce(s, 'WILDCARD READY', 'event');
+  return woke;
+}
+
 function shiftLabel(s, e) {
   const way = e.axis === 'row' ? (e.dir > 0 ? 'right' : 'left') : (e.dir > 0 ? 'down' : 'up');
   return `${lineLabel(s, e.axis, e.index)} shifts ${way}`;
@@ -209,7 +236,7 @@ const RULES = {
   },
   delLine: {
     name: 'Delete a Line', icon: '✂️', target: 'line',
-    desc: 'Delete a row or column. Every square taken away is replaced by a wildcard. Take one from the middle and the board splits.',
+    desc: 'Delete a row or column. Every square taken away is replaced by a wildcard (each one ready after a few turns). Take one from the middle and the board splits.',
     ok: (s) => gridSquares(s).length > 9 && (liveLines(s, 'row').length > 3 || liveLines(s, 'col').length > 3),
     apply(s, seat, t) {
       if (!t || (t.axis !== 'row' && t.axis !== 'col')) return null;
@@ -219,7 +246,7 @@ const RULES = {
       // It becomes a gap; gaps that end up at an edge are cut off entirely.
       const gone = lineKeys(g, t.axis, i).filter((k) => !g.dead.includes(k));
       g.dead.push(...gone);
-      s.wilds.push(...gone.filter((k) => !s.wilds.includes(k)));
+      gone.forEach((k) => addWild(s, k));
       trimGaps(s);
       return middle ? `Deleted ${label} — the board is split` : `Deleted ${label}`;
     },
@@ -254,12 +281,12 @@ const RULES = {
   },
   wildcard: {
     name: 'Wildcard', icon: '★', target: 'wild',
-    desc: 'Add a wildcard square — on the board or just outside it. It counts as X and O, but a line can only use one wildcard, and it’s used up once it’s in a winning line.',
+    desc: 'Add a wildcard square — on the board or just outside it. After a random number of turns it counts as X and O, but a line can only use one wildcard, and it’s used up once it’s in a winning line.',
     apply(s, seat, k) {
       if (typeof k !== 'string' || !/^-?\d+,-?\d+$/.test(k) || s.wilds.includes(k)) return null;
       const [r, c] = unkey(k);
       if (r < -1 || r > s.grid.rows || c < -1 || c > s.grid.cols) return null;
-      s.wilds.push(k);
+      addWild(s, k);
       return onGrid(s, k) ? 'Added a wildcard square' : 'Added a wildcard square outside the grid';
     },
   },
@@ -553,6 +580,7 @@ function createGame(code) {
     grid: newGrid(),
     board: {},                     // "r,c" -> 'x' | 'o'
     wilds: [],                     // wildcard squares, "r,c"
+    wildWait: {},                  // "r,c" -> turns until that wildcard counts
     spent: [],                     // wildcards used up in the winning line, to show until next round
     curses: [],                    // [{ key, by }], hidden from both players
     pending: [],                   // rules that start next round
@@ -578,6 +606,7 @@ function newMatch(s) {
   s.rules = [];
   s.grid = newGrid();
   s.wilds = [];
+  s.wildWait = {};
   s.curses = [];
   s.pending = [];
   s.cheat = { x: false, o: false };
@@ -649,7 +678,24 @@ function beginTurn(s, seat) {
   s.turn = seat;
 }
 
+// After the board changes by itself (a Shift, a wildcard becoming ready), a
+// line for one player wins them the round; lines for both make it a draw.
+// Returns true if the round is over.
+function checkLines(s, how) {
+  const lines = { x: findLine(s, 'x'), o: findLine(s, 'o') };
+  if (lines.x && lines.o) {
+    startDuel(s);
+    return true;
+  }
+  const w = SEATS.find((seat) => lines[seat]);
+  if (!w) return false;
+  s.winLine = lines[w];
+  endRound(s, w, how);
+  return true;
+}
+
 function endTurn(s, seat) {
+  if (wakeWilds(s) && checkLines(s, 'wild')) return;
   const shift = activeRule(s, 'shift');
   if (shift && !shift.done && turnsTaken(s) === 4) {
     shift.done = true;
@@ -657,14 +703,7 @@ function endTurn(s, seat) {
     s.turnLog.push({ kind: 'shift' });
     announce(s, 'SHIFT', 'event');
     note(s, `Shift: ${shiftLabel(s, shift)}.`);
-    const lines = { x: findLine(s, 'x'), o: findLine(s, 'o') };
-    if (lines.x && lines.o) return startDuel(s); // both got a line: call it a draw
-    for (const w of SEATS) {
-      if (lines[w]) {
-        s.winLine = lines[w];
-        return endRound(s, w, 'shift');
-      }
-    }
+    if (checkLines(s, 'shift')) return;
   }
   if (!emptyKeys(s).length) return startDuel(s);
   beginTurn(s, other(seat));
