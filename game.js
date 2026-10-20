@@ -1,15 +1,17 @@
-// Game rules. Only the host's browser runs applyAction(); the guest sends its
-// actions to the host and draws whatever state comes back.
+// Game rules. Only the room owner's browser runs applyAction(); everyone else
+// sends their actions to it and draws whatever state comes back. The two
+// players sit in the 'x' and 'o' seats; anyone else in the room is watching.
 
 const LINES = [
   [0, 1, 2], [3, 4, 5], [6, 7, 8],
   [0, 3, 6], [1, 4, 7], [2, 5, 8],
   [0, 4, 8], [2, 4, 6],
 ];
-const MARKS = { host: 'X', guest: 'O' };
+const SEATS = ['x', 'o'];
+const MARKS = { x: 'X', o: 'O' };
 
-function other(role) {
-  return role === 'host' ? 'guest' : 'host';
+function other(seat) {
+  return seat === 'x' ? 'o' : 'x';
 }
 
 function randInt(n) {
@@ -23,12 +25,13 @@ function randInt(n) {
 //   setup()               secret data for this game, kept in duel.data
 //   options / pick()      the picks a player may make (pick() for games that
 //                         need more than one; it returns true if accepted)
-//   hide(duel, role)      strips what `role` mustn't see before the reveal
+//   hide(duel, seat)      strips what that player mustn't see before the
+//                         reveal (people watching see everything)
 //   resolve(duel)         { winner, info } once both have picked; winner is
-//                         'host', 'guest' or null (another tie)
+//                         'x', 'o' or null (another tie)
 //   describe(entry, n)    one line for the history list
 //   countdown, revealMs   how the reveal is shown, and how long before the
-//                         host moves on
+//                         owner moves everyone on
 
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) {
@@ -41,44 +44,40 @@ function shuffle(a) {
 // The player who got it right wins; if both or neither did, it's a draw.
 // `right` is kept in the result so the draw screen can say which.
 function oneRight(right, info = {}) {
-  const winner = right.host === right.guest ? null : right.host ? 'host' : 'guest';
+  const winner = right.x === right.o ? null : right.x ? 'x' : 'o';
   return { winner, info: { ...info, right } };
 }
 
 const RPS_EMOJI = { rock: '✊', paper: '✋', scissors: '✌️' };
 const DICE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
-const CARD_COLOURS = { host: 'red', guest: 'blue' };
+const CARD_COLOURS = { x: 'red', o: 'blue' };
 
-// Each "_" is a blank, filled from the matching list of words.
-const MADLIBS = [
-  { text: 'My _ ate a _ and then _ all the way to _.',
-    words: [['grandma', 'hamster', 'dentist', 'pet robot'], ['sandwich', 'sock', 'candle', 'trumpet'],
-      ['danced', 'sneezed', 'cried', 'skipped'], ['the moon', 'school', 'the shops', 'Paris']] },
-  { text: 'The _ wizard turned the king into a _ because he was too _.',
-    words: [['grumpy', 'sparkly', 'sleepy', 'tiny'], ['teapot', 'frog', 'pancake', 'traffic cone'],
-      ['loud', 'smelly', 'handsome', 'boring']] },
-  { text: 'Breaking news: a _ has been elected mayor after promising free _ for every _.',
-    words: [['goose', 'toddler', 'vampire', 'talking cheese'], ['hugs', 'spaghetti', 'socks', 'trampolines'],
-      ['grandad', 'cat', 'teacher', 'pigeon']] },
-  { text: "I can't come to school today because my _ is _ and I have to _.",
-    words: [['goldfish', 'homework', 'left shoe', 'uncle'], ['on fire', 'invisible', 'singing opera', 'stuck in a tree'],
-      ['call the police', 'bake a cake', 'hide', 'learn karate']] },
-  { text: "Never trust a _ that _ when you're _.",
-    words: [['clown', 'sandwich', 'penguin', 'librarian'], ['whistles', 'winks', 'cries', 'dances'],
-      ['asleep', 'in the bath', 'eating soup', 'on holiday']] },
-  { text: 'For my birthday I want a _ _ that can _.',
-    words: [['giant', 'purple', 'haunted', 'bouncy'], ['horse', 'castle', 'spoon', 'submarine'],
-      ['fly', 'tell jokes', 'do my homework', 'juggle']] },
-  { text: "The secret ingredient in Grandma's _ is _, which is why it tastes _.",
-    words: [['soup', 'cake', 'lasagne', 'porridge'], ['glitter', 'toenails', 'love', 'ketchup'],
-      ['amazing', 'suspicious', 'crunchy', 'like feet']] },
-  { text: 'Scientists have discovered that _ can _ if you _ them.',
-    words: [['potatoes', 'ducks', 'bin bags', 'grandparents'], ['talk', 'explode', 'glow', 'fly'],
-      ['shout at', 'tickle', 'sing to', 'ignore']] },
-];
+// Mad Libs sentences, loaded from madlibs.txt by app.js (see parseMadlibs).
+// While it's empty, Mad Libs is left out of the bonus games.
+let MADLIBS = [];
+
+// madlibs.txt: a sentence with _ for each blank, then one line per blank
+// listing the words for it, comma-separated. A blank line between sentences;
+// lines starting with # are comments.
+function parseMadlibs(text) {
+  const libs = [];
+  const lines = text.split(/\r?\n/).filter((l) => !l.trim().startsWith('#'));
+  for (const block of lines.join('\n').split(/\n\s*\n/)) {
+    const [sentence, ...rest] = block.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!sentence) continue;
+    const blanks = (sentence.match(/_+/g) || []).length;
+    const words = rest.map((l) => l.split(',').map((w) => w.trim()).filter(Boolean));
+    if (!blanks || words.length !== blanks || words.some((ws) => !ws.length)) {
+      console.warn(`madlibs.txt: skipped "${sentence}" — it has ${blanks} blank(s) but ${words.length} line(s) of words.`);
+      continue;
+    }
+    libs.push({ text: sentence, words });
+  }
+  return libs;
+}
 
 function madlibText(lib, words) {
-  return lib.text.split('_').map((part, i) => part + (i < words.length ? words[i] : '')).join('');
+  return lib.text.split(/_+/).map((part, i) => part + (i < words.length ? words[i] : '')).join('');
 }
 
 const DUELS = {
@@ -86,142 +85,146 @@ const DUELS = {
     name: 'Rock Paper Scissors',
     prompt: 'Rock beats scissors, scissors beat paper, paper beats rock.',
     countdown: true,
-    revealMs: 6500,
+    revealMs: 3200,
     options: ['rock', 'paper', 'scissors'],
     resolve(d) {
       const p = d.picks, beats = { rock: 'scissors', paper: 'rock', scissors: 'paper' };
-      if (p.host === p.guest) return { winner: null };
-      return { winner: beats[p.host] === p.guest ? 'host' : 'guest' };
+      if (p.x === p.o) return { winner: null };
+      return { winner: beats[p.x] === p.o ? 'x' : 'o' };
     },
     describe(e, n) {
-      return `${n.host} threw ${RPS_EMOJI[e.picks.host]}, ${n.guest} threw ${RPS_EMOJI[e.picks.guest]}.`;
+      return `${n.x} threw ${RPS_EMOJI[e.picks.x]}, ${n.o} threw ${RPS_EMOJI[e.picks.o]}.`;
     },
   },
   coin: {
     name: 'Coin Flip',
     prompt: 'You each flip your own coin. Call yours — get it right and your opponent wrong to win.',
     countdown: true,
-    revealMs: 8000,
+    revealMs: 4000,
     options: ['heads', 'tails'],
     resolve(d) {
-      const flips = { host: randInt(2) ? 'heads' : 'tails', guest: randInt(2) ? 'heads' : 'tails' };
-      return oneRight({ host: d.picks.host === flips.host, guest: d.picks.guest === flips.guest }, { flips });
+      const flips = { x: randInt(2) ? 'heads' : 'tails', o: randInt(2) ? 'heads' : 'tails' };
+      return oneRight({ x: d.picks.x === flips.x, o: d.picks.o === flips.o }, { flips });
     },
     describe(e, n) {
       const f = e.info.flips;
-      return `${n.host} called ${e.picks.host} (landed ${f.host}), ${n.guest} called ${e.picks.guest} (landed ${f.guest}).`;
+      return `${n.x} called ${e.picks.x} (landed ${f.x}), ${n.o} called ${e.picks.o} (landed ${f.o}).`;
     },
   },
   cards: {
     name: 'Grab a Card',
-    prompt: 'Nobody can see the cards. Grab one of your colour from your opponent’s hand.',
-    revealMs: 6000,
+    prompt: 'You can see your own hand but not your opponent’s. Grab a card of your colour from theirs.',
+    revealMs: 2800,
     options: ['0', '1', '2'],
     setup() {
-      return { hands: { host: shuffle(['red', 'red', 'blue']), guest: shuffle(['blue', 'blue', 'red']) } };
+      return { hands: { x: shuffle(['red', 'red', 'blue']), o: shuffle(['blue', 'blue', 'red']) } };
     },
-    hide(d) {
-      d.data.hands = null;
+    // You see your own hand, and the card you grabbed once you've grabbed it.
+    hide(d, seat) {
+      const opp = other(seat), grab = d.picks[seat];
+      d.data.hands[opp] = d.data.hands[opp].map((c, i) => (grab === String(i) ? c : null));
     },
     // Each player picks a card (by position) from the other player's hand.
-    grabbed(d, role) {
-      return d.data.hands[other(role)][+d.picks[role]];
+    grabbed(d, seat) {
+      return d.data.hands[other(seat)][+d.picks[seat]];
     },
     resolve(d) {
       return oneRight({
-        host: this.grabbed(d, 'host') === CARD_COLOURS.host,
-        guest: this.grabbed(d, 'guest') === CARD_COLOURS.guest,
+        x: this.grabbed(d, 'x') === CARD_COLOURS.x,
+        o: this.grabbed(d, 'o') === CARD_COLOURS.o,
       });
     },
     describe(e, n) {
-      return `${n.host} grabbed ${this.grabbed(e, 'host')}, ${n.guest} grabbed ${this.grabbed(e, 'guest')}.`;
+      return `${n.x} grabbed ${this.grabbed(e, 'x')}, ${n.o} grabbed ${this.grabbed(e, 'o')}.`;
     },
   },
   dice: {
     name: 'Higher or Lower',
     prompt: 'You can only see your own roll. Is it higher or lower than your opponent’s? (A draw makes you both wrong.)',
-    revealMs: 6500,
+    revealMs: 2800,
     options: ['higher', 'lower'],
     setup() {
-      return { rolls: { host: randInt(6) + 1, guest: randInt(6) + 1 } };
+      return { rolls: { x: randInt(6) + 1, o: randInt(6) + 1 } };
     },
-    hide(d, role) {
-      d.data.rolls[other(role)] = null;
+    hide(d, seat) {
+      d.data.rolls[other(seat)] = null;
     },
     resolve(d) {
       const r = d.data.rolls;
-      const right = (role) => {
-        const mine = r[role], theirs = r[other(role)];
-        return d.picks[role] === 'higher' ? mine > theirs : mine < theirs;
+      const right = (seat) => {
+        const mine = r[seat], theirs = r[other(seat)];
+        return d.picks[seat] === 'higher' ? mine > theirs : mine < theirs;
       };
-      return oneRight({ host: right('host'), guest: right('guest') });
+      return oneRight({ x: right('x'), o: right('o') });
     },
     describe(e, n) {
       const r = e.data.rolls;
-      return `${n.host} rolled ${r.host} and said ${e.picks.host}, ${n.guest} rolled ${r.guest} and said ${e.picks.guest}.`;
+      return `${n.x} rolled ${r.x} and said ${e.picks.x}, ${n.o} rolled ${r.o} and said ${e.picks.o}.`;
     },
   },
   madlibs: {
     name: 'Mad Libs',
-    prompt: 'Fill in the blanks. Then spot which sentence the computer wrote at random.',
-    revealMs: 9000,
+    prompt: 'Fill in the blanks. Then spot which sentence your opponent wrote — the other one is the computer’s.',
+    revealMs: 4000,
+    // The sentence itself goes in the game data, so only the owner needs madlibs.txt.
     setup() {
-      return { lib: randInt(MADLIBS.length), fills: { host: null, guest: null }, pairs: null };
+      const lib = MADLIBS[randInt(MADLIBS.length)];
+      return { lib: { text: lib.text, words: lib.words }, fills: { x: null, o: null }, pairs: null };
     },
     // First pick: the player's words. Second pick: '0' or '1', the sentence
-    // they think the computer wrote.
-    pick(d, role, value) {
-      const lib = MADLIBS[d.data.lib], fills = d.data.fills;
-      if (fills[role] === null) {
+    // they think their opponent wrote.
+    pick(d, seat, value) {
+      const lib = d.data.lib, fills = d.data.fills;
+      if (fills[seat] === null) {
         if (!Array.isArray(value) || value.length !== lib.words.length) return false;
         if (!value.every((w, i) => lib.words[i].includes(w))) return false;
-        fills[role] = value.slice();
-        if (fills[other(role)] !== null) {
+        fills[seat] = value.slice();
+        if (fills[other(seat)] !== null) {
           // The computer's sentence, never the same as either player's.
           let comp, tries = 0;
           do comp = lib.words.map((ws) => ws[randInt(ws.length)]);
-          while (tries++ < 50 && (comp.join() === fills.host.join() || comp.join() === fills.guest.join()));
+          while (tries++ < 50 && (comp.join() === fills.x.join() || comp.join() === fills.o.join()));
           d.data.pairs = {};
-          for (const r of ['host', 'guest']) {
-            d.data.pairs[r] = shuffle([{ words: fills[other(r)], comp: false }, { words: comp, comp: true }]);
+          for (const s of SEATS) {
+            d.data.pairs[s] = shuffle([{ words: fills[other(s)], comp: false }, { words: comp, comp: true }]);
           }
         }
         return true;
       }
-      if (!d.data.pairs || d.picks[role] !== null || (value !== '0' && value !== '1')) return false;
-      d.picks[role] = value;
+      if (!d.data.pairs || d.picks[seat] !== null || (value !== '0' && value !== '1')) return false;
+      d.picks[seat] = value;
       return true;
     },
-    hide(d, role) {
-      const opp = other(role), data = d.data;
+    hide(d, seat) {
+      const opp = other(seat), data = d.data;
       if (data.fills[opp] !== null) data.fills[opp] = 'hidden';
       if (data.pairs) {
         delete data.pairs[opp];
-        data.pairs[role].forEach((p) => delete p.comp);
+        data.pairs[seat].forEach((p) => delete p.comp);
       }
     },
-    spotted(d, role) {
-      return d.data.pairs[role][+d.picks[role]].comp;
+    found(d, seat) {
+      return !d.data.pairs[seat][+d.picks[seat]].comp;
     },
     resolve(d) {
-      return oneRight({ host: this.spotted(d, 'host'), guest: this.spotted(d, 'guest') });
+      return oneRight({ x: this.found(d, 'x'), o: this.found(d, 'o') });
     },
     describe(e, n) {
-      const says = (r) => `${n[r]} ${this.spotted(e, r) ? 'spotted the computer' : 'was fooled'}`;
-      return `${says('host')}, ${says('guest')}.`;
+      const says = (s) => `${n[s]} ${this.found(e, s) ? 'found' : 'missed'} ${n[other(s)]}’s sentence`;
+      return `${says('x')}, ${says('o')}.`;
     },
   },
 };
 
-// Bonus games come in a random order, all five before any repeats.
+// Bonus games come in a random order, all of them before any repeats.
 function nextDuel(d) {
   if (!d.queue.length) {
-    d.queue = shuffle(Object.keys(DUELS));
+    d.queue = shuffle(Object.keys(DUELS).filter((k) => k !== 'madlibs' || MADLIBS.length));
     if (d.queue[0] === d.type) d.queue.push(d.queue.shift());
   }
   d.type = d.queue.shift();
   d.id = randInt(1e9);
-  d.picks = { host: null, guest: null };
+  d.picks = { x: null, o: null };
   d.data = DUELS[d.type].setup ? DUELS[d.type].setup() : {};
   d.result = null;
 }
@@ -234,32 +237,33 @@ function startDuel(s) {
 
 // ---- Game state -----------------------------------------------------------
 
-function createGame(code, host) {
+function createGame(code) {
   return {
     v: 0,
     code,
     phase: 'lobby', // lobby | play | duel | rule
-    players: { host, guest: null },
+    players: { x: null, o: null }, // { id, name } of whoever sits there
+    watchers: [],                  // [{ id, name }]
     round: 1,
-    scores: { host: 0, guest: 0 },
+    scores: { x: 0, o: 0 },
     rules: [],
     board: Array(9).fill(null),
-    turn: 'host',
-    first: 'host',
+    turn: 'x',
+    first: 'x',
     winLine: null,
     duel: null,
     roundWinner: null,
     winHow: null,
-    rematch: { host: false, guest: false },
+    rematch: { x: false, o: false },
     chat: [],
   };
 }
 
 function newMatch(s) {
   s.round = 1;
-  s.scores = { host: 0, guest: 0 };
+  s.scores = { x: 0, o: 0 };
   s.rules = [];
-  s.rematch = { host: false, guest: false };
+  s.rematch = { x: false, o: false };
   startRound(s);
 }
 
@@ -269,7 +273,7 @@ function startRound(s) {
   s.duel = null;
   s.roundWinner = null;
   s.winHow = null;
-  s.first = randInt(2) ? 'host' : 'guest'; // coin flip for who goes first
+  s.first = randInt(2) ? 'x' : 'o'; // coin flip for who goes first
   s.turn = s.first;
   s.phase = 'play';
 }
@@ -281,17 +285,22 @@ function endRound(s, winner, how) {
   s.phase = 'rule';
 }
 
-// Applies one player's action. Returns true if the state changed.
-function applyAction(s, role, a) {
+// Applies one person's action. `seat` is 'x', 'o', or null for someone
+// watching; `name` is theirs, for chat. Returns true if the state changed.
+function applyAction(s, seat, a, name) {
   if (!a || typeof a !== 'object') return false;
   switch (a.type) {
-    case 'move': return move(s, role, a.cell);
-    case 'pick': return pick(s, role, a.value);
-    case 'advance': return advance(s, role);
-    case 'rule': return addRule(s, role, a.text);
-    case 'rematch': return rematch(s, role);
-    case 'chat': return chat(s, role, a.text);
+    case 'chat': return chat(s, seat, a.text, name);
+    case 'advance': return advance(s);
     case 'quickdraw': return quickDraw(s);
+    case 'forcedraw': return forceDraw(s);
+  }
+  if (!SEATS.includes(seat)) return false;
+  switch (a.type) {
+    case 'move': return move(s, seat, a.cell);
+    case 'pick': return pick(s, seat, a.value);
+    case 'rule': return addRule(s, seat, a.text, name);
+    case 'rematch': return rematch(s, seat);
   }
   return false;
 }
@@ -300,38 +309,46 @@ function applyAction(s, role, a) {
 // bonus games.
 function quickDraw(s) {
   if (s.phase !== 'play') return false;
-  s.board = ['host', 'guest', 'host', 'host', 'guest', 'guest', 'guest', 'host', 'host'];
+  s.board = ['x', 'o', 'x', 'x', 'o', 'o', 'o', 'x', 'x'];
   startDuel(s);
   return true;
 }
 
-function move(s, role, cell) {
-  if (s.phase !== 'play' || s.turn !== role) return false;
+// Testing aid: calls the current bonus game a draw and moves on to the next.
+function forceDraw(s) {
+  if (s.phase !== 'duel' || s.duel.result) return false;
+  s.duel.history.push({ type: s.duel.type, forced: true, winner: null });
+  nextDuel(s.duel);
+  return true;
+}
+
+function move(s, seat, cell) {
+  if (s.phase !== 'play' || s.turn !== seat) return false;
   if (!Number.isInteger(cell) || cell < 0 || cell > 8 || s.board[cell]) return false;
-  s.board[cell] = role;
-  const line = LINES.find((l) => l.every((i) => s.board[i] === role));
+  s.board[cell] = seat;
+  const line = LINES.find((l) => l.every((i) => s.board[i] === seat));
   if (line) {
     s.winLine = line;
-    endRound(s, role, 'line');
+    endRound(s, seat, 'line');
   } else if (s.board.every(Boolean)) {
     startDuel(s);
   } else {
-    s.turn = other(role);
+    s.turn = other(seat);
   }
   return true;
 }
 
-function pick(s, role, value) {
+function pick(s, seat, value) {
   const d = s.duel;
   if (s.phase !== 'duel' || d.result) return false;
   const game = DUELS[d.type];
   if (game.pick) {
-    if (!game.pick(d, role, value)) return false;
+    if (!game.pick(d, seat, value)) return false;
   } else {
-    if (d.picks[role] !== null || !game.options.includes(value)) return false;
-    d.picks[role] = value;
+    if (d.picks[seat] !== null || !game.options.includes(value)) return false;
+    d.picks[seat] = value;
   }
-  if (d.picks.host === null || d.picks.guest === null) return true;
+  if (d.picks.x === null || d.picks.o === null) return true;
 
   const { winner, info = null } = game.resolve(d);
   d.result = { winner, info };
@@ -339,49 +356,50 @@ function pick(s, role, value) {
   return true;
 }
 
-// Ends the reveal of a bonus game. The host's browser sends this itself once
-// the reveal has had time to play out.
-function advance(s, role) {
-  if (role !== 'host' || s.phase !== 'duel' || !s.duel.result) return false;
+// Ends the reveal of a bonus game. Only the owner's browser sends this, by
+// itself, once the reveal has had time to play out.
+function advance(s) {
+  if (s.phase !== 'duel' || !s.duel.result) return false;
   if (s.duel.result.winner) endRound(s, s.duel.result.winner, 'duel');
   else nextDuel(s.duel);
   return true;
 }
 
-function addRule(s, role, text) {
-  if (s.phase !== 'rule' || s.roundWinner !== role) return false;
+function addRule(s, seat, text, name) {
+  if (s.phase !== 'rule' || s.roundWinner !== seat) return false;
   text = String(text || '').trim().slice(0, 200);
-  if (text) s.rules.push({ by: role, text, round: s.round });
+  if (text) s.rules.push({ by: seat, name, text, round: s.round });
   s.round++;
   startRound(s);
   return true;
 }
 
-function rematch(s, role) {
-  if (s.phase === 'lobby' || s.rematch[role]) return false;
-  s.rematch[role] = true;
-  if (s.rematch[other(role)]) newMatch(s);
+function rematch(s, seat) {
+  if (s.phase === 'lobby' || s.rematch[seat]) return false;
+  s.rematch[seat] = true;
+  if (s.rematch[other(seat)]) newMatch(s);
   return true;
 }
 
-function chat(s, role, text) {
+function chat(s, seat, text, name) {
   text = String(text || '').trim().slice(0, 200);
   if (!text) return false;
-  s.chat.push({ from: role, text });
+  s.chat.push({ from: seat, name, text });
   if (s.chat.length > 100) s.chat.splice(0, s.chat.length - 100);
   return true;
 }
 
 // The copy of the state a player is allowed to see: until a bonus game is
-// revealed, the opponent's pick and the game's secrets are hidden.
-function viewFor(s, role) {
+// revealed, the opponent's pick and the game's secrets are hidden. Someone
+// watching (seat null) sees everything.
+function viewFor(s, seat) {
   const v = JSON.parse(JSON.stringify(s));
   const d = v.duel;
-  if (v.phase === 'duel' && d && !d.result) {
-    const opp = other(role);
+  if (SEATS.includes(seat) && v.phase === 'duel' && d && !d.result) {
+    const opp = other(seat);
     if (d.picks[opp] !== null) d.picks[opp] = 'hidden';
     const game = DUELS[d.type];
-    if (game.hide) game.hide(d, role);
+    if (game.hide) game.hide(d, seat);
   }
   return v;
 }

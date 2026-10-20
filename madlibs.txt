@@ -1,0 +1,59 @@
+# Mad Libs sentences for Super Naughts & Crosses.
+#
+# How to write one:
+#   - Put the sentence on one line, with _ where each blank goes.
+#   - Under it, add one line for each blank, in order, listing the words a
+#     player can choose for that blank, separated by commas.
+#   - Leave an empty line before the next sentence.
+#   - Lines starting with # are notes like this one and are ignored.
+#
+# Example:
+#
+#   My _ ate a _.
+#   grandma, hamster, dentist
+#   sandwich, sock, candle
+#
+# A sentence whose number of word lines doesn't match its number of blanks is
+# skipped (the browser console says which). The room's host loads this file
+# when they open the page, so reload after editing it.
+
+My _ ate a _ and then _ all the way to _.
+grandma, hamster, dentist, pet robot
+sandwich, sock, candle, trumpet
+danced, sneezed, cried, skipped
+the moon, school, the shops, Paris
+
+The _ wizard turned the king into a _ because he was too _.
+grumpy, sparkly, sleepy, tiny
+teapot, frog, pancake, traffic cone
+loud, smelly, handsome, boring
+
+Breaking news: a _ has been elected mayor after promising free _ for every _.
+goose, toddler, vampire, talking cheese
+hugs, spaghetti, socks, trampolines
+grandad, cat, teacher, pigeon
+
+I can't come to school today because my _ is _ and I have to _.
+goldfish, homework, left shoe, uncle
+on fire, invisible, singing opera, stuck in a tree
+call the police, bake a cake, hide, learn karate
+
+Never trust a _ that _ when you're _.
+clown, sandwich, penguin, librarian
+whistles, winks, cries, dances
+asleep, in the bath, eating soup, on holiday
+
+For my birthday I want a _ _ that can _.
+giant, purple, haunted, bouncy
+horse, castle, spoon, submarine
+fly, tell jokes, do my homework, juggle
+
+The secret ingredient in Grandma's _ is _, which is why it tastes _.
+soup, cake, lasagne, porridge
+glitter, toenails, love, ketchup
+amazing, suspicious, crunchy, like feet
+
+Scientists have discovered that _ can _ if you _ them.
+potatoes, ducks, bin bags, grandparents
+talk, explode, glow, fly
+shout at, tickle, sing to, ignore

@@ -24,7 +24,12 @@
     </div>
 
     <div class="card">
-      <button id="host-btn" class="primary wide">Host a new game</button>
+      <label>Host a new game</label>
+      <div class="row">
+        <button id="host-play-btn" class="primary grow">I'll play</button>
+        <button id="host-watch-btn" class="grow">I'll watch</button>
+      </div>
+      <p class="hint">Either way you choose who gets in.</p>
     </div>
 
     <div class="card">
@@ -46,7 +51,9 @@
       <button id="leave-btn" class="ghost">Leave</button>
     </header>
 
+    <div id="requests"></div>
     <div id="scores" class="scores"></div>
+    <p id="watchers" class="hint"></p>
 
     <div class="layout">
       <main id="panel" class="card"></main>
