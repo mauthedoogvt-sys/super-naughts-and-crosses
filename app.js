@@ -79,8 +79,11 @@ try {
 // This tab's own game if it has one, otherwise the most likely game to resume
 // (the owner's copy is the real one), unless another tab has it open.
 function loadSave() {
-  return tabStore.get(SAVE_KEY) || [store.get(`${SAVE_KEY}-owner`), store.get(`${SAVE_KEY}-client`)]
-    .find((s) => s && !openElsewhere(s)) || null;
+  // (Games saved before the board could change shape can't be resumed.)
+  const fits = (s) => s && (!s.state || s.state.grid);
+  const own = tabStore.get(SAVE_KEY);
+  return (fits(own) && own) || [store.get(`${SAVE_KEY}-owner`), store.get(`${SAVE_KEY}-client`)]
+    .find((s) => fits(s) && !openElsewhere(s)) || null;
 }
 
 function deleteSave(saved) {
@@ -156,7 +159,7 @@ function start() {
   location.hash = session.code;
   $('home').hidden = true;
   $('game').hidden = false;
-  lastChatKey = lastPanel = null;
+  lastChatKey = lastPanel = lastBanner = null;
   openPeer();
   if (session.role === 'owner') scheduleAdvance();
   render();
@@ -607,8 +610,14 @@ function render() {
       ? `<div class="lobby"><p class="big-msg">Asking to join game <b>${esc(session.code)}</b>…</p>
           <p class="hint">The host can see your name, <b>${esc(me.name)}</b>, and will let you in.</p></div>`
       : `<p class="big-msg">Joining game <b>${esc(session.code)}</b>…</p>`);
-    $('scores').innerHTML = $('watchers').innerHTML = '';
+    $('scores').innerHTML = $('watchers').innerHTML = $('turn-order').innerHTML = '';
     return;
+  }
+
+  if (state.banner && state.banner.n !== lastBanner) {
+    // Play it if it's new, or if we've only just arrived and it's still fresh.
+    if (lastBanner !== null || Date.now() - state.banner.t < 4000) playBanner(state.banner.steps);
+    lastBanner = state.banner.n;
   }
 
   const mine = mySeat(), online = onlineIds();
@@ -626,12 +635,14 @@ function render() {
   $('watchers').innerHTML = state.watchers.length
     ? `👀 Watching: ${state.watchers.map((w) => esc(w.name) + (w.id === session.id ? ' (you)' : '')).join(', ')}`
     : '';
+  $('turn-order').innerHTML = ended ? '' : turnOrderHtml();
 
   setPanel(ended ? endedHtml() : panelHtml());
 
   $('rules').innerHTML = state.rules.length
-    ? state.rules.map((r) => `<li>${esc(r.text)} <small>— ${esc(r.name)}, round ${r.round}</small></li>`).join('')
-    : '<li class="empty">No extra rules yet. Win a round to add one.</li>';
+    ? state.rules.map((r) => `<li><b>${RULES[r.type]?.icon || ''} ${esc(RULES[r.type]?.name || '')}</b>
+        ${esc(r.text)} <small>— ${esc(r.name)}, round ${r.round}</small></li>`).join('')
+    : '<li class="empty">No rules yet. Win a round to pick one.</li>';
 
   const chatKey = state.chat.length + ':' + (state.chat.at(-1)?.text || '');
   if (chatKey !== lastChatKey) {
@@ -679,13 +690,109 @@ function setPanel(html) {
   $('panel').innerHTML = html;
 }
 
-function boardHtml(clickable, small) {
-  return `<div class="board ${small ? 'small' : ''}">${state.board.map((cell, i) => {
-    const win = state.winLine && state.winLine.includes(i) ? 'win' : '';
-    const mark = cell ? `<span class="${cell}">${MARKS[cell]}</span>` : '';
-    const can = clickable && !cell;
-    return `<button class="cell ${win}" data-cell="${i}" ${can ? '' : 'disabled'}>${mark}</button>`;
-  }).join('')}</div>`;
+// ---- The board ----
+// Drawn over everything worth showing: the grid, tiles pushed off it and
+// wildcards outside it, plus `ring` more squares all round (for pickers).
+// Options:
+//   cell(sq)   attributes that make a square a button (else it's disabled)
+//   edges      { top(c), bottom(c), left(r), right(r) }: html for controls
+//              in an extra row/column round the outside
+//   ring, small
+
+function square(s, r, c) {
+  const k = key(r, c), g = s.grid;
+  return {
+    k, r, c,
+    kind: !inRect(g, r, c) ? 'off' : isGap(g, r, c) ? 'gap' : 'play',
+    tile: s.board[k] || null,
+    wild: s.wilds.includes(k) || s.gapWild === k,
+    win: !!s.winLine?.includes(k),
+    curse: s.curses.some((x) => x.key === k), // only ever seen by people watching
+  };
+}
+
+function squareHtml(sq, attrs) {
+  if (sq.kind === 'off' && !sq.tile && !sq.wild && !attrs) return '<span class="cell off"></span>';
+  const cls = ['cell', sq.kind, sq.wild && 'wild', sq.win && 'win', sq.curse && 'cursed'].filter(Boolean).join(' ');
+  const inner = sq.tile ? `<span class="${sq.tile}">${MARKS[sq.tile]}</span>` : sq.wild ? '<span class="star">★</span>' : '';
+  return `<button class="${cls}" ${attrs || 'disabled'}>${inner}</button>`;
+}
+
+function gridHtml(s, o = {}) {
+  let r0 = 0, r1 = s.grid.rows - 1, c0 = 0, c1 = s.grid.cols - 1;
+  for (const k of [...Object.keys(s.board), ...s.wilds]) {
+    const [r, c] = unkey(k);
+    r0 = Math.min(r0, r); r1 = Math.max(r1, r);
+    c0 = Math.min(c0, c); c1 = Math.max(c1, c);
+  }
+  const ring = o.ring || 0, e = o.edges, pad = e ? 1 : 0;
+  r0 -= ring; r1 += ring; c0 -= ring; c1 += ring;
+  const out = [], blank = '<span></span>';
+  for (let r = r0 - pad; r <= r1 + pad; r++) {
+    for (let c = c0 - pad; c <= c1 + pad; c++) {
+      const outR = r < r0 || r > r1, outC = c < c0 || c > c1;
+      if (outR && outC) out.push(blank);
+      else if (outR) out.push((r < r0 ? e.top : e.bottom)?.(c) || blank);
+      else if (outC) out.push((c < c0 ? e.left : e.right)?.(r) || blank);
+      else out.push(squareHtml(square(s, r, c), o.cell?.(square(s, r, c))));
+    }
+  }
+  const n = c1 - c0 + 1, cols = e ? `2.2rem repeat(${n}, 1fr) 2.2rem` : `repeat(${n}, 1fr)`;
+  return `<div class="board ${o.small ? 'small' : ''} ${e ? 'edged' : ''}"
+    style="--n: ${n}; grid-template-columns: ${cols}">${out.join('')}</div>`;
+}
+
+// The turn order along the top: turns taken this round, whose turn it is,
+// and what's coming as things stand (Shift and Role Swap are on the
+// schedule; a Turn Swap or a curse can still change it).
+function turnOrderHtml() {
+  if (state.phase !== 'play') return '';
+  const chip = (seat, cls, title, label = MARKS[seat]) =>
+    `<span class="t ${seat || ''} ${cls}" title="${title}">${label}</span>`;
+  const event = (label, title, cls = '') => `<span class="t event ${cls}" title="${title}">${label}</span>`;
+  const out = state.turnLog.map((e) => {
+    if (e.kind === 'shift') return event('↔ Shift', 'The Shift happened here', 'past');
+    if (e.kind === 'roles') return event('🔀 Roles', `${MARKS[e.seat]}’s turn went on swapping roles`, 'past');
+    if (e.kind === 'reversal') return chip(e.seat, 'past skipped', 'Snatched by a Turn Swap') + event('REVERSAL', 'Turn Swap', 'rev');
+    if (e.kind === 'cursed') return chip(e.seat, 'past', 'Wasted on a cursed square', `${MARKS[e.seat]}💀`);
+    return chip(e.seat, 'past', 'Done');
+  });
+  const roles = activeRule(state, 'roleSwap'), shift = activeRule(state, 'shift');
+  let taken = turnsTaken(state), seat = state.turn, left = emptyKeys(state).length, now = true;
+  while (left > 0 && out.length < 40) {
+    if (!now && roles && !roles.done && taken === 2) {
+      out.push(event('🔀 Roles', 'Role Swap: this turn is spent swapping who owns X and O'));
+    } else {
+      out.push(chip(seat, now ? 'now' : 'next', now ? 'Now' : 'Coming up'));
+      now = false;
+      left--;
+    }
+    taken++;
+    if (shift && !shift.done && taken === 4) out.push(event('↔ Shift', `Shift: ${shiftLabel(state, shift)}`));
+    seat = other(seat);
+  }
+  return `<span class="label">Turn order</span>${out.join('<span class="arrow">›</span>')}`;
+}
+
+// Flashes the banners queued by announce() one after another. A turn start
+// that's about to be cut off by a REVERSAL only shows for a moment.
+let bannerTimers = [], lastBanner = null;
+function playBanner(steps) {
+  bannerTimers.forEach(clearTimeout);
+  const el = $('banner');
+  let t = 0;
+  bannerTimers = steps.map((st, i) => {
+    const cut = steps[i + 1]?.cls === 'rev';
+    const ms = cut ? 600 : st.cls === 'rev' ? 1400 : 1100;
+    const at = t;
+    t += ms;
+    return setTimeout(() => {
+      el.className = `${st.cls} ${cut ? 'cut' : ''}`;
+      el.innerHTML = `<span style="animation-duration: ${ms}ms">${esc(st.text)}</span>`;
+      el.hidden = false;
+    }, at);
+  });
+  bannerTimers.push(setTimeout(() => { el.hidden = true; }, t));
 }
 
 // Earlier bonus games this round. The one being revealed right now is left
@@ -723,6 +830,7 @@ function duelHtml() {
     : '<button class="ghost test-btn" data-forcedraw title="Testing: call this bonus game a draw">Draw this bonus game (test)</button>';
   return `<h2>${first ? "It's a draw!" : 'Still a draw!'} Bonus game: ${g.name}</h2>
     <p class="hint">${g.prompt}</p>
+    ${d.cheat ? `<p class="cheat">🕵️ <b>Cheat:</b> ${esc(d.cheat)}</p>` : ''}
     <div class="arena arena-${d.type}" style="--d: ${g.countdown ? 1.5 : 0}s">
       <div class="side ${opp}"><span class="who">${nameOf(opp)}</span>${sides.opp}</div>
       <div class="centre">${centreHtml(d, me, opp, g, spec)}</div>
@@ -906,37 +1014,100 @@ function panelHtml() {
 
   if (state.phase === 'play') {
     const myTurn = state.turn === mine;
-    const fresh = state.board.every((c) => !c);
-    const flip = fresh
+    const flip = !Object.keys(state.board).length && !state.turnLog.length
       ? `<p class="flip">🪙 Coin flip: <b>${you(state.first)}</b> ${state.first === mine ? 'go' : 'goes'} first.</p>`
       : '';
     const turn = myTurn ? `Your turn — you're <b>${MARKS[mine]}</b>.`
       : !state.players[state.turn] ? `Waiting for someone to take the ${MARKS[state.turn]} seat…`
       : `Waiting for ${nameOf(state.turn)} (${MARKS[state.turn]})…`;
-    return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${boardHtml(myTurn, false)}
+    const cell = (sq) => (myTurn && sq.kind === 'play' && !sq.tile && !sq.wild ? `data-cell="${sq.k}"` : '');
+    return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${gridHtml(state, { cell })}
+      ${roundRulesHtml()}
       <button class="ghost test-btn" data-quickdraw title="Testing: skip to a drawn board">Quick draw (test)</button>`;
   }
 
   if (state.phase === 'duel') return duelHtml();
-
-  if (state.phase === 'rule') {
-    const w = state.roundWinner;
-    const head = w === mine ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
-    const how = state.winHow === 'line' ? 'Three in a row.' : 'Decided by bonus game.';
-    const form = w === mine
-      ? `<form id="rule-form">
-          <label for="rule-text">Add a rule for the rest of the match:</label>
-          <textarea id="rule-text" maxlength="200" rows="3" placeholder="e.g. The centre square is off limits"></textarea>
-          <div class="row">
-            <button class="primary">Add rule &amp; next round</button>
-            <button type="button" data-skip>Skip</button>
-          </div>
-          <p class="hint">Rules are on the honour system for now — the game doesn't enforce them yet.</p>
-        </form>`
-      : `<p>Waiting for ${nameOf(w)} to add a rule…</p>`;
-    return `<h2>${head}</h2><p>${how}</p>${boardHtml(false, true)}${duelHistoryHtml(false)}${form}`;
-  }
+  if (state.phase === 'rule') return rulePhaseHtml();
   return '';
+}
+
+// What's in play this round, under the board.
+function roundRulesHtml() {
+  const notes = state.active.filter((e) => !e.done).map((e) => {
+    const by = e.by === mySeat() ? 'your' : `${nameOf(e.by)}’s`;
+    if (e.type === 'shift') return `↔️ Shift: after two turns each, ${shiftLabel(state, e)}.`;
+    if (e.type === 'roleSwap') return '🔀 Role Swap: after two turns, X and O swap owners.';
+    if (e.type === 'turnSwap') return `🔄 Turn Swap: ${by} opponent’s turns may be snatched.`;
+    return '';
+  });
+  if (state.gapWild) notes.push('★ One square of the gap is a wildcard this round.');
+  return notes.length ? `<ul class="round-rules">${notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : '';
+}
+
+let ruleDraft = { round: null, type: null }; // the rule card you've clicked on
+
+function rulePhaseHtml() {
+  const w = state.roundWinner, chooser = w === mySeat();
+  const head = chooser ? `You win round ${state.round}!` : `${nameOf(w)} wins round ${state.round}.`;
+  const how = { line: 'Three in a row.', shift: 'Three in a row, thanks to the Shift.', duel: 'Decided by bonus game.' }[state.winHow];
+  if (ruleDraft.round !== state.round) ruleDraft = { round: state.round, type: null };
+  const sel = chooser ? ruleDraft.type : null;
+  const cards = `<div class="rule-cards">${state.offer.map((k) => {
+    const R = RULES[k];
+    return `<button class="rule-card ${sel === k ? 'chosen' : ''}" ${chooser ? `data-rulecard="${k}"` : 'disabled'}>
+      <span class="ricon">${R.icon}</span><b>${R.name}</b><span class="hint">${R.desc}</span></button>`;
+  }).join('')}</div>`;
+  const body = chooser
+    ? `<p><b>Pick a rule:</b></p>${cards}${sel ? pickerHtml(sel) : ''}
+       <button type="button" class="ghost" data-skip>Skip — no rule</button>`
+    : `<p>Waiting for ${nameOf(w)} to pick a rule…</p>${cards}`;
+  return `<h2>${head}</h2><p>${how}</p>${gridHtml(state, { small: true })}${duelHistoryHtml(false)}${body}`;
+}
+
+// How the chosen rule is aimed, on next round's (empty) board. Every button
+// carries data-target: the target to send, as JSON.
+function pickerHtml(type) {
+  const R = RULES[type], g = state.grid;
+  const t = (v) => `data-target="${esc(JSON.stringify(v))}"`;
+  const blank = { ...state, board: {}, winLine: null, gapWild: null, curses: [] };
+  const btn = (label, title, target) => `<button class="edge-btn" title="${title}" ${t(target)}>${label}</button>`;
+  const rowOk = (r) => liveLines(state, 'row').includes(r), colOk = (c) => liveLines(state, 'col').includes(c);
+  let how, board;
+  if (R.target === 'side') {
+    how = 'Click an edge to add a row or column there.';
+    board = gridHtml(blank, { edges: {
+      top: (c) => colOk(c) && btn('＋', 'Add a row on top', 'top'),
+      bottom: (c) => colOk(c) && btn('＋', 'Add a row on the bottom', 'bottom'),
+      left: (r) => rowOk(r) && btn('＋', 'Add a column on the left', 'left'),
+      right: (r) => rowOk(r) && btn('＋', 'Add a column on the right', 'right'),
+    } });
+  } else if (R.target === 'line') {
+    how = 'Click ✕ by the row or column to delete.';
+    const rows = liveLines(state, 'row').length > 3, cols = liveLines(state, 'col').length > 3;
+    board = gridHtml(blank, { edges: {
+      left: (r) => rows && rowOk(r) && btn('✕', `Delete ${lineLabel(state, 'row', r)}`, { axis: 'row', index: r }),
+      top: (c) => cols && colOk(c) && btn('✕', `Delete ${lineLabel(state, 'col', c)}`, { axis: 'col', index: c }),
+    } });
+  } else if (R.target === 'shift') {
+    how = 'Click an arrow: that row or column slides that way after two turns each.';
+    const arrow = (label, axis, index, dir) => btn(label, `${lineLabel(state, axis, index)} shifts ${label}`, { axis, index, dir });
+    board = gridHtml(blank, { edges: {
+      left: (r) => rowOk(r) && arrow('◀', 'row', r, -1),
+      right: (r) => rowOk(r) && arrow('▶', 'row', r, 1),
+      top: (c) => colOk(c) && arrow('▲', 'col', c, -1),
+      bottom: (c) => colOk(c) && arrow('▼', 'col', c, 1),
+    } });
+  } else if (R.target === 'cell') {
+    how = 'Click the square to curse. Once you have, you won’t be shown it again.';
+    board = gridHtml(blank, { cell: (sq) => (sq.kind === 'play' && !sq.wild ? t(sq.k) : '') });
+  } else if (R.target === 'wild') {
+    how = 'Click a square for the wildcard — on the board or just outside it.';
+    const near = (sq) => sq.r >= -1 && sq.r <= g.rows && sq.c >= -1 && sq.c <= g.cols;
+    board = gridHtml(blank, { ring: 1, cell: (sq) => (!sq.wild && near(sq) ? t(sq.k) : '') });
+  } else {
+    return `<div class="picker"><button class="primary" ${t(null)}>Use ${R.name}</button></div>`;
+  }
+  return `<div class="picker picker-${R.target}"><p class="hint">${how}</p>${board}</div>`;
 }
 
 function endedHtml() {
@@ -1019,22 +1190,23 @@ $('requests').addEventListener('click', (e) => {
 $('panel').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.cell !== undefined) act({ type: 'move', cell: +b.dataset.cell });
+  if (b.dataset.cell !== undefined) act({ type: 'move', cell: b.dataset.cell });
+  else if (b.dataset.rulecard !== undefined) {
+    ruleDraft.type = b.dataset.rulecard;
+    render();
+  } else if (b.dataset.target !== undefined) {
+    act({ type: 'rule', rule: ruleDraft.type, target: JSON.parse(b.dataset.target) });
+  }
   else if (b.dataset.pick !== undefined) act({ type: 'pick', value: b.dataset.pick });
   else if (b.dataset.word !== undefined) {
     mlDraft.words[+b.dataset.word] = b.dataset.w;
     render();
   } else if (b.dataset.mlsubmit !== undefined) act({ type: 'pick', value: mlDraft.words.slice() });
-  else if (b.dataset.skip !== undefined) act({ type: 'rule', text: '' });
+  else if (b.dataset.skip !== undefined) act({ type: 'rule', rule: null });
   else if (b.dataset.quickdraw !== undefined) act({ type: 'quickdraw' });
   else if (b.dataset.forcedraw !== undefined) act({ type: 'forcedraw' });
   else if (b.dataset.copy !== undefined) copyInvite();
   else if (b.dataset.home !== undefined) leaveGame();
-});
-$('panel').addEventListener('submit', (e) => {
-  if (e.target.id !== 'rule-form') return;
-  e.preventDefault();
-  act({ type: 'rule', text: $('rule-text').value });
 });
 
 // Pick up where we left off if this page was reloaded mid-game.

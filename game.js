@@ -2,11 +2,6 @@
 // sends their actions to it and draws whatever state comes back. The two
 // players sit in the 'x' and 'o' seats; anyone else in the room is watching.
 
-const LINES = [
-  [0, 1, 2], [3, 4, 5], [6, 7, 8],
-  [0, 3, 6], [1, 4, 7], [2, 5, 8],
-  [0, 4, 8], [2, 4, 6],
-];
 const SEATS = ['x', 'o'];
 const MARKS = { x: 'X', o: 'O' };
 
@@ -20,6 +15,237 @@ function randInt(n) {
   return buf[0] % n;
 }
 
+// ---- The board ------------------------------------------------------------
+// A grid of rows × cols that rules can grow and shrink. Squares are keyed
+// "r,c" and can lie outside the grid. A row or column deleted from the middle
+// stays behind as a gap of dead squares, splitting the board; each round one
+// gap square is drawn to be a wildcard. Tiles a Shift pushes off the grid
+// stay where they land but only count for diagonals. Wildcard squares (on the
+// grid or off it) count as X and O, but a line can use only one wildcard.
+
+const key = (r, c) => `${r},${c}`;
+const unkey = (k) => k.split(',').map(Number);
+
+function newGrid() {
+  return { rows: 3, cols: 3, gapRows: [], gapCols: [] };
+}
+
+function inRect(g, r, c) {
+  return r >= 0 && r < g.rows && c >= 0 && c < g.cols;
+}
+
+function isGap(g, r, c) {
+  return inRect(g, r, c) && (g.gapRows.includes(r) || g.gapCols.includes(c));
+}
+
+// On the grid and not in a gap (wildcard squares included).
+function onGrid(s, k) {
+  const [r, c] = unkey(k);
+  return inRect(s.grid, r, c) && !isGap(s.grid, r, c);
+}
+
+// A square a tile can be placed on.
+function playable(s, k) {
+  return onGrid(s, k) && !s.wilds.includes(k);
+}
+
+function rectKeys(s) {
+  const out = [];
+  for (let r = 0; r < s.grid.rows; r++) for (let c = 0; c < s.grid.cols; c++) out.push(key(r, c));
+  return out;
+}
+
+const gridSquares = (s) => rectKeys(s).filter((k) => onGrid(s, k));
+const emptyKeys = (s) => rectKeys(s).filter((k) => playable(s, k) && !s.board[k]);
+
+// The rows (or columns) that aren't gaps.
+function liveLines(s, axis) {
+  const g = s.grid, n = axis === 'row' ? g.rows : g.cols, gaps = axis === 'row' ? g.gapRows : g.gapCols;
+  return [...Array(n).keys()].filter((i) => !gaps.includes(i));
+}
+
+function lineLabel(s, axis, i) {
+  return `${axis === 'row' ? 'row' : 'column'} ${liveLines(s, axis).indexOf(i) + 1}`;
+}
+
+// What square k is worth to `seat` in a line: 'tile', 'wild' or nothing.
+function worth(s, k, seat, diagonal) {
+  const t = s.board[k];
+  if (t) return t === seat && (diagonal || onGrid(s, k)) ? 'tile' : null;
+  return s.wilds.includes(k) || s.gapWild === k ? 'wild' : null;
+}
+
+const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+
+// Three in a row for `seat`, as a list of squares, or null.
+function findLine(s, seat) {
+  const starts = [...Object.keys(s.board).filter((k) => s.board[k] === seat), ...s.wilds];
+  if (s.gapWild) starts.push(s.gapWild);
+  for (const k of starts) {
+    const [r, c] = unkey(k);
+    for (const [dr, dc] of DIRS) {
+      for (let off = 0; off < 3; off++) {
+        const line = [0, 1, 2].map((i) => key(r + (i - off) * dr, c + (i - off) * dc));
+        const got = line.map((q) => worth(s, q, seat, dr && dc));
+        if (got.every(Boolean) && got.filter((g) => g === 'wild').length <= 1) return line;
+      }
+    }
+  }
+  return null;
+}
+
+// Moves everything on the board (and its gaps) by dr rows and dc columns.
+function moveAll(s, dr, dc) {
+  const mv = (k) => { const [r, c] = unkey(k); return key(r + dr, c + dc); };
+  s.wilds = s.wilds.map(mv);
+  s.curses.forEach((x) => { x.key = mv(x.key); });
+  s.board = Object.fromEntries(Object.entries(s.board).map(([k, t]) => [mv(k), t]));
+  s.grid.gapRows = s.grid.gapRows.map((r) => r + dr);
+  s.grid.gapCols = s.grid.gapCols.map((c) => c + dc);
+}
+
+// Cuts off gap rows and columns at the edges of the grid, and anything lying
+// in line with them.
+function trimGaps(s) {
+  const g = s.grid;
+  const drop = (axis, i) => {
+    const at = (k) => unkey(k)[axis === 'row' ? 0 : 1];
+    s.wilds = s.wilds.filter((k) => at(k) !== i);
+    s.curses = s.curses.filter((x) => at(x.key) !== i);
+    if (axis === 'row') { g.gapRows = g.gapRows.filter((r) => r !== i); g.rows--; }
+    else { g.gapCols = g.gapCols.filter((c) => c !== i); g.cols--; }
+  };
+  for (let again = true; again;) {
+    if (g.gapRows.includes(0)) { drop('row', 0); moveAll(s, -1, 0); }
+    else if (g.gapRows.includes(g.rows - 1)) drop('row', g.rows - 1);
+    else if (g.gapCols.includes(0)) { drop('col', 0); moveAll(s, 0, -1); }
+    else if (g.gapCols.includes(g.cols - 1)) drop('col', g.cols - 1);
+    else again = false;
+  }
+}
+
+// Pushes every tile in a row or column one square along.
+function shiftLine(s, e) {
+  const rows = e.axis === 'row', board = {};
+  for (const [k, t] of Object.entries(s.board)) {
+    let [r, c] = unkey(k);
+    if (rows && r === e.index) c += e.dir;
+    if (!rows && c === e.index) r += e.dir;
+    board[key(r, c)] = t;
+  }
+  s.board = board;
+}
+
+function shiftLabel(s, e) {
+  const way = e.axis === 'row' ? (e.dir > 0 ? 'right' : 'left') : (e.dir > 0 ? 'down' : 'up');
+  return `${lineLabel(s, e.axis, e.index)} shifts ${way}`;
+}
+
+// ---- Rules ----------------------------------------------------------------
+// Whoever wins a round picks one of three rules drawn at random. Each has:
+//   ok(s, seat)               whether it can be drawn right now
+//   target                    what the player has to pick: 'side', 'line',
+//                             'cell', 'wild', 'shift' or nothing
+//   apply(s, seat, target)    puts it into play; returns the line for the
+//                             rules list, or null if the target is no good
+// Rules for "next round" go in s.pending and move to s.active when it starts.
+
+const RULES = {
+  addLine: {
+    name: 'Add a Line', icon: '➕', target: 'side',
+    desc: 'Add a row or column to an edge of the board, for the rest of the match.',
+    apply(s, seat, side) {
+      const g = s.grid;
+      if (side === 'top') { g.rows++; moveAll(s, 1, 0); return 'Added a row on top'; }
+      if (side === 'bottom') { g.rows++; return 'Added a row on the bottom'; }
+      if (side === 'left') { g.cols++; moveAll(s, 0, 1); return 'Added a column on the left'; }
+      if (side === 'right') { g.cols++; return 'Added a column on the right'; }
+      return null;
+    },
+  },
+  delLine: {
+    name: 'Delete a Line', icon: '✂️', target: 'line',
+    desc: 'Delete a row or column. Take one from the middle and the board splits — each round, one square of the gap is a wildcard.',
+    ok: (s) => gridSquares(s).length > 9 && (liveLines(s, 'row').length > 3 || liveLines(s, 'col').length > 3),
+    apply(s, seat, t) {
+      if (!t || (t.axis !== 'row' && t.axis !== 'col')) return null;
+      const rows = t.axis === 'row', g = s.grid, live = liveLines(s, t.axis), i = t.index;
+      if (live.length <= 3 || !live.includes(i)) return null;
+      const label = lineLabel(s, t.axis, i), middle = i !== live[0] && i !== live.at(-1);
+      // It becomes a gap; gaps that end up at an edge are cut off entirely.
+      (rows ? g.gapRows : g.gapCols).push(i);
+      trimGaps(s);
+      s.wilds = s.wilds.filter((k) => !isGap(g, ...unkey(k)));
+      return middle ? `Deleted ${label} — the board is split` : `Deleted ${label}`;
+    },
+  },
+  curse: {
+    name: 'Curse', icon: '💀', target: 'cell',
+    desc: 'Secretly curse a square. The first tile placed there is dropped and that turn is wasted. Nobody sees where — not even you, afterwards.',
+    apply(s, seat, k) {
+      if (typeof k !== 'string' || !playable(s, k)) return null;
+      s.curses.push({ key: k, by: seat });
+      return 'Cursed a hidden square';
+    },
+  },
+  shift: {
+    name: 'Shift', icon: '↔️', target: 'shift',
+    desc: 'Next round, after two turns each, a row or column of your choice slides one space. Tiles pushed off the grid still count for diagonals.',
+    apply(s, seat, t) {
+      if (!t || (t.axis !== 'row' && t.axis !== 'col') || (t.dir !== 1 && t.dir !== -1)) return null;
+      if (!liveLines(s, t.axis).includes(t.index)) return null;
+      const e = { type: 'shift', by: seat, axis: t.axis, index: t.index, dir: t.dir };
+      s.pending.push(e);
+      return `Next round, after two turns each, ${shiftLabel(s, e)}`;
+    },
+  },
+  turnSwap: {
+    name: 'Turn Swap', icon: '🔄',
+    desc: 'Next round, each of your opponent’s turns has a growing chance to be snatched — REVERSAL! — and you play instead.',
+    apply(s, seat) {
+      s.pending.push({ type: 'turnSwap', by: seat, n: 0 });
+      return 'Turn Swap next round';
+    },
+  },
+  wildcard: {
+    name: 'Wildcard', icon: '★', target: 'wild',
+    desc: 'Add a wildcard square — on the board or just outside it. It counts as X and O, but a line can only use one wildcard.',
+    apply(s, seat, k) {
+      if (typeof k !== 'string' || !/^-?\d+,-?\d+$/.test(k) || s.wilds.includes(k)) return null;
+      const [r, c] = unkey(k);
+      if (r < -1 || r > s.grid.rows || c < -1 || c > s.grid.cols) return null;
+      s.wilds.push(k);
+      return onGrid(s, k) ? 'Added a wildcard square' : 'Added a wildcard square outside the grid';
+    },
+  },
+  cheat: {
+    name: 'Cheat', icon: '🕵️',
+    desc: 'Get inside information in the next bonus games, until someone wins them.',
+    ok: (s, seat) => !s.cheat[seat],
+    apply(s, seat) {
+      s.cheat[seat] = true;
+      return 'Cheating in the next bonus games';
+    },
+  },
+  roleSwap: {
+    name: 'Role Swap', icon: '🔀',
+    desc: 'Next round, after two turns, a turn is spent swapping who owns X and who owns O.',
+    apply(s, seat) {
+      s.pending.push({ type: 'roleSwap', by: seat });
+      return 'Role Swap next round';
+    },
+  },
+};
+
+function drawOffer(s, seat) {
+  return shuffle(Object.keys(RULES).filter((k) => !RULES[k].ok || RULES[k].ok(s, seat))).slice(0, 3);
+}
+
+const activeRule = (s, type) => (s.active || []).find((e) => e.type === type) || null;
+
+// Turns taken so far this round (a wasted turn or a role swap counts).
+const turnsTaken = (s) => s.turnLog.filter((e) => e.kind !== 'reversal' && e.kind !== 'shift').length;
+
 // ---- Bonus games ----------------------------------------------------------
 // A drawn round goes to bonus games until one has a winner. Each game has:
 //   setup()               secret data for this game, kept in duel.data
@@ -30,6 +256,8 @@ function randInt(n) {
 //   resolve(duel)         { winner, info } once both have picked; winner is
 //                         'x', 'o' or null (another tie)
 //   describe(entry, n)    one line for the history list
+//   cheat(duel, seat)     the hint a player with the Cheat rule gets (worked
+//                         out from the unhidden game; data.seed picks which)
 //   countdown, revealMs   how the reveal is shown, and how long before the
 //                         owner moves everyone on
 
@@ -87,6 +315,12 @@ const DUELS = {
     countdown: true,
     revealMs: 3200,
     options: ['rock', 'paper', 'scissors'],
+    cheat(d, seat) {
+      const theirs = d.picks[other(seat)];
+      if (theirs === null) return 'Wait for them to throw…';
+      const not = this.options.filter((o) => o !== theirs)[d.data.seed % 2];
+      return `They didn’t throw ${RPS_EMOJI[not]} ${not}.`;
+    },
     resolve(d) {
       const p = d.picks, beats = { rock: 'scissors', paper: 'rock', scissors: 'paper' };
       if (p.x === p.o) return { winner: null };
@@ -102,8 +336,18 @@ const DUELS = {
     countdown: true,
     revealMs: 4000,
     options: ['heads', 'tails'],
+    // The coins are flipped up front, so a cheat can know how they'll land.
+    setup() {
+      return { flips: { x: randInt(2) ? 'heads' : 'tails', o: randInt(2) ? 'heads' : 'tails' } };
+    },
+    hide(d) {
+      delete d.data.flips;
+    },
+    cheat(d, seat) {
+      return `Their coin is going to land ${d.data.flips[other(seat)]}.`;
+    },
     resolve(d) {
-      const flips = { x: randInt(2) ? 'heads' : 'tails', o: randInt(2) ? 'heads' : 'tails' };
+      const flips = d.data.flips;
       return oneRight({ x: d.picks.x === flips.x, o: d.picks.o === flips.o }, { flips });
     },
     describe(e, n) {
@@ -128,6 +372,12 @@ const DUELS = {
     grabbed(d, seat) {
       return d.data.hands[other(seat)][+d.picks[seat]];
     },
+    cheat(d, seat) {
+      const hand = d.data.hands[other(seat)];
+      const wrong = [0, 1, 2].filter((i) => hand[i] !== CARD_COLOURS[seat]);
+      const i = wrong[d.data.seed % wrong.length];
+      return `Card ${i + 1} in their hand is ${hand[i]} — not the one you need.`;
+    },
     resolve(d) {
       return oneRight({
         x: this.grabbed(d, 'x') === CARD_COLOURS.x,
@@ -148,6 +398,9 @@ const DUELS = {
     },
     hide(d, seat) {
       d.data.rolls[other(seat)] = null;
+    },
+    cheat(d, seat) {
+      return `They rolled a ${d.data.rolls[other(seat)]}.`;
     },
     resolve(d) {
       const r = d.data.rolls;
@@ -203,6 +456,11 @@ const DUELS = {
         data.pairs[seat].forEach((p) => delete p.comp);
       }
     },
+    cheat(d, seat) {
+      const theirs = d.data.fills[other(seat)];
+      if (theirs === null) return 'Wait for them to finish their sentence…';
+      return `One of their words is “${theirs[d.data.seed % theirs.length]}”.`;
+    },
     found(d, seat) {
       return !d.data.pairs[seat][+d.picks[seat]].comp;
     },
@@ -225,7 +483,7 @@ function nextDuel(d) {
   d.type = d.queue.shift();
   d.id = randInt(1e9);
   d.picks = { x: null, o: null };
-  d.data = DUELS[d.type].setup ? DUELS[d.type].setup() : {};
+  d.data = { ...(DUELS[d.type].setup ? DUELS[d.type].setup() : {}), seed: randInt(1e6) };
   d.result = null;
 }
 
@@ -246,8 +504,18 @@ function createGame(code) {
     watchers: [],                  // [{ id, name }]
     round: 1,
     scores: { x: 0, o: 0 },
-    rules: [],
-    board: Array(9).fill(null),
+    rules: [],                     // [{ by, name, type, text, round }] for the list
+    grid: newGrid(),
+    board: {},                     // "r,c" -> 'x' | 'o'
+    wilds: [],                     // wildcard squares, "r,c"
+    gapWild: null,                 // this round's wildcard square in a gap
+    curses: [],                    // [{ key, by }], hidden from both players
+    pending: [],                   // rules that start next round
+    active: [],                    // rules in play this round
+    cheat: { x: false, o: false },
+    offer: null,                   // the three rules the round's winner picks from
+    turnLog: [],                   // [{ seat, kind }] this round, for the turn order
+    banner: { n: 0, steps: [] },   // what flashes up on screen (see announce())
     turn: 'x',
     first: 'x',
     winLine: null,
@@ -263,25 +531,106 @@ function newMatch(s) {
   s.round = 1;
   s.scores = { x: 0, o: 0 };
   s.rules = [];
+  s.grid = newGrid();
+  s.wilds = [];
+  s.curses = [];
+  s.pending = [];
+  s.cheat = { x: false, o: false };
   s.rematch = { x: false, o: false };
   startRound(s);
 }
 
+function note(s, text) {
+  s.chat.push({ sys: true, text });
+}
+
+// Queues a banner ("X TURN START", "REVERSAL"…) to flash up for everyone.
+// Everything announced during one action plays in order.
+function announce(s, text, cls) {
+  if (!s.banner.open) s.banner = { n: s.banner.n + 1, steps: [], t: Date.now(), open: true };
+  s.banner.steps.push({ text, cls });
+}
+
 function startRound(s) {
-  s.board = Array(9).fill(null);
+  s.board = {};
   s.winLine = null;
   s.duel = null;
   s.roundWinner = null;
   s.winHow = null;
+  s.offer = null;
+  s.curses = s.curses.filter((x) => playable(s, x.key));
+  const gaps = rectKeys(s).filter((k) => isGap(s.grid, ...unkey(k)) && !s.wilds.includes(k));
+  s.gapWild = gaps.length ? gaps[randInt(gaps.length)] : null;
+  s.active = s.pending;
+  s.pending = [];
+  s.turnLog = [];
   s.first = randInt(2) ? 'x' : 'o'; // coin flip for who goes first
-  s.turn = s.first;
   s.phase = 'play';
+  beginTurn(s, s.first);
+}
+
+// Swaps who owns X and who owns O.
+function swapSeats(s) {
+  const flip = (o) => { [o.x, o.o] = [o.o, o.x]; };
+  flip(s.players);
+  flip(s.scores);
+  flip(s.rematch);
+  flip(s.cheat);
+  for (const e of [...s.active, ...s.pending, ...s.curses, ...s.rules]) e.by = other(e.by);
+}
+
+function beginTurn(s, seat) {
+  const roles = activeRule(s, 'roleSwap');
+  if (roles && !roles.done && turnsTaken(s) === 2) {
+    // This turn is spent swapping roles instead of placing a tile.
+    roles.done = true;
+    swapSeats(s);
+    s.turnLog.push({ seat, kind: 'roles' });
+    announce(s, 'ROLE SWAP', 'event');
+    note(s, `Role swap! ${s.players.x?.name || 'Nobody'} is X now and ${s.players.o?.name || 'nobody'} is O.`);
+    return endTurn(s, seat);
+  }
+  const swap = activeRule(s, 'turnSwap');
+  if (swap && !swap.done && seat !== swap.by) {
+    swap.n++;
+    if (randInt(4) < swap.n) { // 25%, then 50%, 75%, 100%
+      swap.done = true;
+      announce(s, `${MARKS[seat]} TURN START`, seat);
+      announce(s, 'REVERSAL', 'rev');
+      s.turnLog.push({ seat, kind: 'reversal' });
+      seat = swap.by;
+    }
+  }
+  announce(s, `${MARKS[seat]} TURN START`, seat);
+  s.turn = seat;
+}
+
+function endTurn(s, seat) {
+  const shift = activeRule(s, 'shift');
+  if (shift && !shift.done && turnsTaken(s) === 4) {
+    shift.done = true;
+    shiftLine(s, shift);
+    s.turnLog.push({ kind: 'shift' });
+    announce(s, 'SHIFT', 'event');
+    note(s, `Shift: ${shiftLabel(s, shift)}.`);
+    const lines = { x: findLine(s, 'x'), o: findLine(s, 'o') };
+    if (lines.x && lines.o) return startDuel(s); // both got a line: call it a draw
+    for (const w of SEATS) {
+      if (lines[w]) {
+        s.winLine = lines[w];
+        return endRound(s, w, 'shift');
+      }
+    }
+  }
+  if (!emptyKeys(s).length) return startDuel(s);
+  beginTurn(s, other(seat));
 }
 
 function endRound(s, winner, how) {
   s.roundWinner = winner;
   s.winHow = how;
   s.scores[winner]++;
+  s.offer = drawOffer(s, winner);
   s.phase = 'rule';
 }
 
@@ -289,6 +638,7 @@ function endRound(s, winner, how) {
 // watching; `name` is theirs, for chat. Returns true if the state changed.
 function applyAction(s, seat, a, name) {
   if (!a || typeof a !== 'object') return false;
+  s.banner.open = false;
   switch (a.type) {
     case 'chat': return chat(s, seat, a.text, name);
     case 'advance': return advance(s);
@@ -299,7 +649,7 @@ function applyAction(s, seat, a, name) {
   switch (a.type) {
     case 'move': return move(s, seat, a.cell);
     case 'pick': return pick(s, seat, a.value);
-    case 'rule': return addRule(s, seat, a.text, name);
+    case 'rule': return addRule(s, seat, a.rule, a.target, name);
     case 'rematch': return rematch(s, seat);
   }
   return false;
@@ -309,7 +659,12 @@ function applyAction(s, seat, a, name) {
 // bonus games.
 function quickDraw(s) {
   if (s.phase !== 'play') return false;
-  s.board = ['x', 'o', 'x', 'x', 'o', 'o', 'o', 'x', 'x'];
+  const keys = emptyKeys(s);
+  for (let i = 0; i < 300; i++) {
+    const marks = shuffle(keys.map((k, j) => (j % 2 ? 'o' : 'x')));
+    keys.forEach((k, j) => { s.board[k] = marks[j]; });
+    if (!findLine(s, 'x') && !findLine(s, 'o')) break;
+  }
   startDuel(s);
   return true;
 }
@@ -324,16 +679,24 @@ function forceDraw(s) {
 
 function move(s, seat, cell) {
   if (s.phase !== 'play' || s.turn !== seat) return false;
-  if (!Number.isInteger(cell) || cell < 0 || cell > 8 || s.board[cell]) return false;
+  if (typeof cell !== 'string' || !/^-?\d+,-?\d+$/.test(cell) || !playable(s, cell) || s.board[cell]) return false;
+  const curse = s.curses.findIndex((x) => x.key === cell);
+  if (curse >= 0) {
+    s.curses.splice(curse, 1);
+    s.turnLog.push({ seat, kind: 'cursed' });
+    announce(s, 'CURSED!', 'rev');
+    note(s, `${MARKS[seat]}’s tile landed on a cursed square and was dropped.`);
+    endTurn(s, seat);
+    return true;
+  }
   s.board[cell] = seat;
-  const line = LINES.find((l) => l.every((i) => s.board[i] === seat));
+  s.turnLog.push({ seat, kind: 'move' });
+  const line = findLine(s, seat);
   if (line) {
     s.winLine = line;
     endRound(s, seat, 'line');
-  } else if (s.board.every(Boolean)) {
-    startDuel(s);
   } else {
-    s.turn = other(seat);
+    endTurn(s, seat);
   }
   return true;
 }
@@ -360,15 +723,25 @@ function pick(s, seat, value) {
 // itself, once the reveal has had time to play out.
 function advance(s) {
   if (s.phase !== 'duel' || !s.duel.result) return false;
-  if (s.duel.result.winner) endRound(s, s.duel.result.winner, 'duel');
-  else nextDuel(s.duel);
+  if (s.duel.result.winner) {
+    s.cheat = { x: false, o: false }; // cheats last until someone wins the bonus games
+    endRound(s, s.duel.result.winner, 'duel');
+  } else {
+    nextDuel(s.duel);
+  }
   return true;
 }
 
-function addRule(s, seat, text, name) {
+// The round's winner picks one of the rules on offer (rule null skips).
+function addRule(s, seat, rule, target, name) {
   if (s.phase !== 'rule' || s.roundWinner !== seat) return false;
-  text = String(text || '').trim().slice(0, 200);
-  if (text) s.rules.push({ by: seat, name, text, round: s.round });
+  if (rule != null) {
+    if (!s.offer.includes(rule)) return false;
+    const text = RULES[rule].apply(s, seat, target);
+    if (!text) return false;
+    s.rules.push({ by: seat, name, type: rule, text, round: s.round });
+    note(s, `${name} chose ${RULES[rule].name}.`);
+  }
   s.round++;
   startRound(s);
   return true;
@@ -389,16 +762,21 @@ function chat(s, seat, text, name) {
   return true;
 }
 
-// The copy of the state a player is allowed to see: until a bonus game is
-// revealed, the opponent's pick and the game's secrets are hidden. Someone
-// watching (seat null) sees everything.
+// The copy of the state a player is allowed to see: nobody sees the curses,
+// and until a bonus game is revealed, the opponent's pick and the game's
+// secrets are hidden (apart from what a cheat lets through). Someone watching
+// (seat null) sees everything.
 function viewFor(s, seat) {
   const v = JSON.parse(JSON.stringify(s));
+  if (!SEATS.includes(seat)) return v;
+  v.curses = [];
   const d = v.duel;
-  if (SEATS.includes(seat) && v.phase === 'duel' && d && !d.result) {
+  if (v.phase === 'duel' && d && !d.result) {
+    const game = DUELS[d.type];
+    // (A view of a view already has its cheat worked out.)
+    if (v.cheat[seat] && game.cheat && d.cheat === undefined) d.cheat = game.cheat(d, seat);
     const opp = other(seat);
     if (d.picks[opp] !== null) d.picks[opp] = 'hidden';
-    const game = DUELS[d.type];
     if (game.hide) game.hide(d, seat);
   }
   return v;

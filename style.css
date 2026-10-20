@@ -183,35 +183,173 @@ button.grow { flex: 1; }
 
 /* ---- Board ---- */
 
+/* --n is the number of columns drawn; the grid template is set inline. */
 .board {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
-  width: min(100%, 360px);
+  width: min(100%, calc(var(--n) * 116px));
   margin: 12px auto;
-  background: var(--line);
-  border-radius: 10px;
-  padding: 6px;
+  container-type: inline-size;
 }
-.board.small { width: 150px; gap: 3px; padding: 3px; }
+.board.edged { width: min(100%, calc(var(--n) * 100px + 4.4rem)); }
+.board.small { width: min(100%, calc(var(--n) * 46px)); gap: 3px; }
 .cell {
   aspect-ratio: 1;
+  min-width: 0;
   padding: 0;
-  border: none;
-  border-radius: 6px;
+  border: 3px solid var(--line);
+  border-radius: 8px;
   background: var(--card);
-  font-size: clamp(2rem, 12vw, 4rem);
+  font-size: calc(55cqw / var(--n));
   font-weight: 800;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.board.small .cell { font-size: 1.6rem; border-radius: 3px; }
+.cell.play { border-color: color-mix(in srgb, var(--muted) 50%, var(--line)); }
+.board.small .cell { border-width: 2px; border-radius: 4px; }
 .cell:disabled { opacity: 1; }
 .cell:not(:disabled):hover { background: var(--bg); }
 .cell.win { background: var(--win); }
 .cell .x { color: var(--x); }
 .cell .o { color: var(--o); }
+/* Off the grid: empty space, unless a tile was pushed there or a wildcard sits there. */
+.cell.off { background: transparent; border: 2px dashed color-mix(in srgb, var(--muted) 45%, transparent); }
+span.cell.off { border-color: transparent; }
+.cell.off > span:not(.star) { opacity: 0.55; }
+button.cell.off:not(:disabled):hover { border-color: var(--muted); }
+/* A gap left by a deleted row or column. */
+.cell.gap {
+  background: repeating-linear-gradient(45deg, transparent 0 6px, var(--line) 6px 9px);
+  border-color: transparent;
+}
+.cell.wild { background: color-mix(in srgb, #9b59d0 18%, var(--card)); border-color: #9b59d0; }
+.cell.wild .star { color: #9b59d0; }
+.cell.cursed { box-shadow: inset 0 0 0 3px #555; }
+.cell.cursed::after { content: '💀'; position: absolute; font-size: 0.8rem; opacity: 0.5; transform: translate(150%, -150%); }
+.cell { position: relative; }
+.edge-btn {
+  padding: 0;
+  min-width: 0;
+  align-self: stretch;
+  justify-self: stretch;
+  min-height: 2.2rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.picker { margin: 8px 0; }
+.picker .board { width: min(100%, calc(var(--n) * 64px)); }
+.picker .board.edged { width: min(100%, calc(var(--n) * 64px + 4.4rem)); }
+.picker button.cell:not(:disabled):hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.round-rules { list-style: none; padding: 0; margin: 4px 0; color: var(--muted); font-size: 0.9rem; }
+
+/* Turn order along the top */
+.turn-order {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 10px;
+  margin-bottom: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.turn-order:empty { display: none; }
+.turn-order .label { font-size: 0.8rem; color: var(--muted); margin-right: 6px; }
+.turn-order .arrow { color: var(--muted); }
+.t {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 5px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  font-weight: 800;
+}
+.t.x { color: var(--x); }
+.t.o { color: var(--o); }
+.t.past { opacity: 0.4; }
+.t.now { border-color: currentColor; font-size: 1.15rem; }
+.t.skipped { text-decoration: line-through; }
+.t.event { font-size: 0.75rem; color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.t.event.rev { color: var(--bad); background: color-mix(in srgb, var(--bad) 15%, transparent); opacity: 1; }
+
+/* Banners: TURN START, REVERSAL, SHIFT… */
+#banner {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+  z-index: 20;
+}
+#banner span {
+  width: 100%;
+  padding: 18px 8px;
+  text-align: center;
+  font-size: clamp(2rem, 9vw, 4.5rem);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: var(--accent);
+  box-shadow: 0 6px 30px rgb(0 0 0 / 0.35);
+  animation: banner both;
+}
+#banner.x span { background: var(--x); }
+#banner.o span { background: var(--o); }
+#banner.event span { background: var(--warn); }
+#banner.cut span { animation-name: banner-cut; }
+#banner.rev span { background: #111; color: #ff3b3b; animation-name: reversal; }
+@keyframes banner {
+  0% { transform: scaleY(0); opacity: 0; }
+  12% { transform: none; opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes banner-cut {
+  0% { transform: scaleY(0); }
+  15%, 100% { transform: none; }
+}
+@keyframes reversal {
+  0% { transform: scaleX(-1); }
+  8% { transform: translateX(-12px) skewX(-12deg); }
+  16% { transform: translateX(10px) skewX(10deg); }
+  24% { transform: translateX(-6px); }
+  32%, 85% { transform: none; opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Picking a rule */
+.rule-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+.rule-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 10px;
+  border-width: 2px;
+  border-radius: 12px;
+}
+.rule-card:disabled { opacity: 0.8; }
+.rule-card .ricon { font-size: 2rem; line-height: 1.2; }
+.rule-card.chosen { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.cheat {
+  display: inline-block;
+  margin: 4px 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #9b59d0 15%, transparent);
+}
 
 .turn { font-size: 1.1rem; }
 .turn.mine { font-weight: 700; }
