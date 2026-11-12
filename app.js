@@ -4,6 +4,8 @@
 // it and asks to come in; the owner sees their name and lets them in to play
 // (while a seat is free) or to watch, or turns them away. The owner can play
 // or just watch. People watching see everything, secrets included.
+// A room can instead be a bracket (see Brackets in game.js): the owner lets in
+// as many players as they like, starts it, and moves it on between matches.
 // Everyone saves after every change so they can reload and reconnect: to
 // sessionStorage, so a reloaded tab gets back its own game even when others are
 // in other tabs of the same browser, and to localStorage (one slot per role) so
@@ -126,13 +128,15 @@ function readName(fallback) {
   store.set(NAME_KEY, me.name);
 }
 
-function hostNewGame(watch) {
+function hostNewGame(watch, bracket) {
   readName('Host');
   const code = newCode(), id = newId();
   session = { code, role: 'owner', id, fresh: true };
-  state = createGame(code);
-  if (watch) state.watchers.push({ id, name: me.name });
+  state = createGame(code, bracket);
+  // In a bracket everyone watches until their match comes up.
+  if (watch || bracket) state.watchers.push({ id, name: me.name });
   else state.players.x = { id, name: me.name };
+  if (bracket && !watch) state.bracket.entrants.push({ id, name: me.name });
   start();
 }
 
@@ -444,8 +448,12 @@ function letIn(id, asPlayer) {
   const p = pending.find((q) => q.id === id);
   if (!p) return;
   pending = pending.filter((q) => q !== p);
-  const seat = asPlayer && SEATS.find((s) => !state.players[s]);
-  if (seat) {
+  const seat = !state.bracket && asPlayer && SEATS.find((s) => !state.players[s]);
+  if (state.bracket && asPlayer && state.phase === 'lobby') {
+    state.watchers.push({ id, name: p.name });
+    state.bracket.entrants.push({ id, name: p.name });
+    sysChat(`${p.name} joined the bracket`);
+  } else if (seat) {
     state.players[seat] = { id, name: p.name };
     sysChat(`${p.name} joined as ${MARKS[seat]}`);
     if (state.phase === 'lobby' && state.players.x && state.players.o) newMatch(state);
@@ -467,7 +475,10 @@ function turnAway(id) {
 
 // Someone left for good: free their seat for someone else to take over.
 function onBye(id) {
-  const seat = seatOf(id), name = memberName(id);
+  const b = state.bracket, name = memberName(id);
+  if (b && !b.rounds.length) b.entrants = b.entrants.filter((e) => e.id !== id);
+  else if (b && b.entrants.some((e) => e.id === id)) forfeit(state, id, true);
+  const seat = seatOf(id);
   if (seat) state.players[seat] = null;
   else state.watchers = state.watchers.filter((w) => w.id !== id);
   const c = links.get(id);
@@ -573,7 +584,7 @@ function scheduleAdvance() {
 }
 
 function ownerApply(id, a) {
-  if (applyAction(state, seatOf(id), a, memberName(id))) commit();
+  if (applyAction(state, seatOf(id), a, memberName(id), id)) commit();
 }
 
 function act(a) {
@@ -613,6 +624,7 @@ function render() {
           <p class="hint">The host can see your name, <b>${esc(me.name)}</b>, and will let you in.</p></div>`
       : `<p class="big-msg">Joining game <b>${esc(session.code)}</b>…</p>`);
     $('scores').innerHTML = $('watchers').innerHTML = $('turn-order').innerHTML = '';
+    $('bracket-card').hidden = true;
     return;
   }
 
@@ -622,8 +634,9 @@ function render() {
     lastBanner = state.banner.n;
   }
 
-  const mine = mySeat(), online = onlineIds();
-  $('scores').innerHTML = SEATS.map((s) => {
+  const mine = mySeat(), online = onlineIds(), bracket = state.bracket;
+  // (Between a bracket's matches nobody is sitting down.)
+  $('scores').innerHTML = bracket && !state.players.x && !state.players.o ? '' : SEATS.map((s) => {
     const p = state.players[s];
     const active = state.phase === 'play' && state.turn === s;
     const note = !p ? ' <small>(empty seat)</small>' : s === mine ? ' <small>(you)</small>'
@@ -633,10 +646,13 @@ function render() {
       <span class="pname">${nameOf(s)}${note}</span>
       <span class="score">${state.scores[s]}</span>
     </div>`;
-  }).join(`<div class="round">Round ${state.round}</div>`);
+  }).join(`<div class="round">Round ${state.round}${bracket ? `<br>first to ${bracket.target}` : ''}</div>`);
   $('watchers').innerHTML = state.watchers.length
-    ? `👀 Watching: ${state.watchers.map((w) => esc(w.name) + (w.id === session.id ? ' (you)' : '')).join(', ')}`
+    ? `👀 Watching: ${state.watchers.map((w) => esc(w.name) + (bracket?.out.includes(w.id) ? ' 👻' : '')
+        + (w.id === session.id ? ' (you)' : '')).join(', ')}`
     : '';
+  $('bracket-card').hidden = !bracket || !bracket.rounds.length;
+  $('bracket').innerHTML = $('bracket-card').hidden ? '' : bracketHtml();
   $('turn-order').innerHTML = ended ? '' : turnOrderHtml();
 
   setPanel(ended ? endedHtml() : panelHtml());
@@ -657,7 +673,7 @@ function render() {
   }
 
   const rb = $('rematch-btn');
-  rb.hidden = state.phase === 'lobby' || !!ended || !mine;
+  rb.hidden = state.phase === 'lobby' || !!ended || !mine || !!bracket;
   if (mine) {
     const opp = other(mine);
     rb.disabled = state.rematch[mine];
@@ -671,17 +687,25 @@ function render() {
 // The owner's list of people asking to come in.
 function requestsHtml() {
   if (!state) return '';
-  const free = SEATS.filter((s) => !state.players[s]);
+  const b = state.bracket;
+  // A bracket takes players until it starts; a game, while a seat is empty.
+  const free = b ? [] : SEATS.filter((s) => !state.players[s]);
+  const canPlay = b ? state.phase === 'lobby' : free.length;
   const asks = pending.map((p) => `<div class="request">
       <span class="rname"><b>${esc(p.name)}</b> wants to join</span>
-      ${free.length ? `<button class="primary" data-letin="${esc(p.id)}" data-play>Let in to play</button>` : ''}
+      ${canPlay ? `<button class="primary" data-letin="${esc(p.id)}" data-play>Let in to play</button>` : ''}
       <button data-letin="${esc(p.id)}">Let in to watch</button>
       <button class="ghost" data-turnaway="${esc(p.id)}">Reject</button>
     </div>`).join('');
   const empty = state.phase !== 'lobby' && free.length && !pending.length
     ? `<p class="hint seat-note">The ${free.map((s) => MARKS[s]).join(' and ')} seat is empty. Share the code and let someone in to take it over.</p>`
     : '';
-  return asks + empty;
+  // A bracket can't wait for ever for a player who has dropped out.
+  const online = onlineIds();
+  const offline = b && b.cur ? SEATS.map((s) => state.players[s]).filter((p) => p && !online.includes(p.id))
+    .map((p) => `<p class="hint seat-note">${esc(p.name)} is offline.
+      <button class="mini" data-forfeit="${esc(p.id)}">Forfeit their match</button></p>`).join('') : '';
+  return asks + empty + offline;
 }
 
 // Only touch the panel when it actually changes, so a half-typed rule survives
@@ -761,6 +785,8 @@ function turnOrderHtml() {
     if (e.kind === 'roles') return event('🔀 Roles', `${MARKS[e.seat]}’s turn went on swapping roles`, 'past');
     if (e.kind === 'reversal') return chip(e.seat, 'past skipped', 'Snatched by a Turn Swap') + event('REVERSAL', 'Turn Swap', 'rev');
     if (e.kind === 'cursed') return chip(e.seat, 'past', 'Wasted on a cursed square', `${MARKS[e.seat]}💀`);
+    if (e.kind === 'stumble') return chip(e.seat, 'past', 'Stumbled: turn missed', `${MARKS[e.seat]}🦶`);
+    if (e.kind === 'jinxed') return chip(e.seat, 'past', 'Jinxed: the tile slipped away', `${MARKS[e.seat]}🎲`);
     return chip(e.seat, 'past', 'Done');
   });
   const roles = activeRule(state, 'roleSwap'), shift = activeRule(state, 'shift');
@@ -1003,6 +1029,8 @@ function panelHtml() {
   const mine = mySeat();
   const owner = session.role === 'owner';
 
+  if (state.phase === 'lobby' && state.bracket) return bracketLobbyHtml(owner);
+  if (state.phase === 'matchover') return matchOverHtml(owner);
   if (state.phase === 'lobby') {
     const seated = SEATS.filter((s) => state.players[s]).length;
     if (!owner) {
@@ -1028,15 +1056,138 @@ function panelHtml() {
       : `Waiting for ${nameOf(state.turn)} (${MARKS[state.turn]})…`;
     const cell = (sq) => (myTurn && sq.kind === 'play' && !sq.tile && !sq.wild ? `data-cell="${sq.k}"` : '');
     return `${flip}<p class="turn ${myTurn ? 'mine' : ''}">${turn}</p>${gridHtml(state, { cell })}
-      ${roundRulesHtml()}
+      ${roundRulesHtml()}${crowdHtml()}
       <button class="ghost test-btn" data-quickdraw title="Testing: skip to a drawn board">Quick draw (test)</button>`;
   }
 
-  if (state.phase === 'duel') return duelHtml();
-  if (state.phase === 'place') return placePhaseHtml();
-  if (state.phase === 'rule') return rulePhaseHtml();
+  if (state.phase === 'duel') return duelHtml() + crowdHtml();
+  if (state.phase === 'place') return placePhaseHtml() + crowdHtml();
+  if (state.phase === 'rule') return rulePhaseHtml() + crowdHtml();
   return '';
 }
+
+// ---- Brackets ----
+
+function bracketLobbyHtml(owner) {
+  const b = state.bracket, n = b.entrants.length;
+  const list = n ? `<ol class="entrants">${b.entrants.map((e) => `<li>${esc(e.name)}
+      ${e.id === session.id ? '<small>(you)</small>' : ''}
+      ${owner ? `<button class="mini ghost" title="Take out of the bracket" data-unenter="${esc(e.id)}">✕</button>` : ''}</li>`).join('')}</ol>`
+    : '<p class="hint">Nobody yet.</p>';
+  if (!owner) {
+    const inIt = b.entrants.some((e) => e.id === session.id);
+    return `<div class="lobby"><p class="big-msg">${inIt ? 'You’re in the bracket!' : 'You’re watching this bracket.'}</p>
+      <p>Waiting for the host to start it…</p><h2>In the bracket (${n})</h2>${list}</div>`;
+  }
+  const others = state.watchers.filter((w) => !b.entrants.some((e) => e.id === w.id));
+  const add = others.length ? `<p class="hint">Watching: ${others.map((w) => `${esc(w.name)}
+      <button class="mini" data-enter="${esc(w.id)}">Add to bracket</button>`).join(' ')}</p>` : '';
+  const wins = [1, 2, 3].map((t) => `<button class="${b.target === t ? 'chosen' : ''}" data-wins="${t}">${t}</button>`).join('');
+  return `<div class="lobby">
+    <p>Send this code to everyone playing:</p>
+    <p class="code-big">${esc(session.code)}</p>
+    <button data-copy>Copy invite link</button>
+    <h2>In the bracket (${n})</h2>${list}${add}
+    <div class="choices wins"><span>Round wins to take a match:</span>${wins}</div>
+    <button class="primary" data-startbracket ${n < 2 ? 'disabled' : ''}>Start the bracket</button>
+    <p class="hint">It’s a knockout, one match at a time, drawn at random. Once it starts, anyone new can
+      only watch. Everyone knocked out gets to vote on hexes for the matches still to come.</p>
+  </div>`;
+}
+
+// The bracket in the sidebar: every round's matches, winners in bold.
+function bracketHtml() {
+  const b = state.bracket;
+  const side = (m, id) => {
+    if (!id) return '<span class="tbd">to be decided</span>';
+    const cls = !m.winner ? '' : m.winner === id ? 'won' : 'lost';
+    return `<span class="${cls}">${esc(entrantName(state, id))}${id === session.id ? ' <small>(you)</small>' : ''}</span>`;
+  };
+  return b.rounds.map((round, r) => {
+    const name = roundName(b, r) + (round.length > 1 && r >= b.rounds.length - 3 ? 's' : '');
+    return `<h4>${name}</h4>${round.map((m, i) => {
+      if (r === 0 && !m.b) return `<div class="bmatch">${side(m, m.a)}<small>bye</small></div>`;
+      const live = b.cur && b.cur.r === r && b.cur.m === i;
+      return `<div class="bmatch ${live ? 'live' : ''}">${side(m, m.a)}<small>vs</small>${side(m, m.b)}</div>`;
+    }).join('')}`;
+  }).join('') + (b.champion ? `<p class="champ">🏆 ${esc(entrantName(state, b.champion))}</p>` : '');
+}
+
+// Between a bracket's matches, and once it's won.
+function matchOverHtml(owner) {
+  const b = state.bracket, l = b.last, nm = (id) => esc(entrantName(state, id));
+  const wins = (id) => (id === session.id ? 'You win' : `${nm(id)} wins`);
+  let html = b.champion ? `<p class="trophy">🏆</p><h2>${wins(b.champion)} the bracket!</h2>` : '';
+  if (l) {
+    const score = l.score ? ` ${l.score[0]}–${l.score[1]}` : '';
+    if (!b.champion) html += `<h2>${wins(l.winner)} the match${score}${l.forfeit ? ' by forfeit' : ''}</h2>`;
+    else if (score) html += `<p>The final finished${score}${l.forfeit ? ', by forfeit' : ''}.</p>`;
+    if (!b.champion) {
+      html += `<p>${l.loser === session.id ? 'You’re' : `${nm(l.loser)} is`} knocked out —
+        and can now vote on hexes for the matches still to come.</p>`;
+    }
+    if (l.score) html += gridHtml(state);
+  }
+  const next = b.rounds.flat().find((m) => !m.winner && m.a && m.b);
+  if (next) html += `<p class="turn">Next match: <b>${nm(next.a)}</b> against <b>${nm(next.b)}</b></p>`;
+  if (owner) {
+    html += b.champion ? '<button class="primary" data-newbracket>New bracket</button>'
+      : '<button class="primary" data-nextmatch>Next match ▶</button>';
+  } else {
+    html += `<p class="hint">Waiting for the host to ${b.champion ? 'set up another bracket' : 'start the next match'}…</p>`;
+  }
+  return html;
+}
+
+// Under the board during a bracket match: the knocked-out vote on a hex for
+// the next round. The players only see how many have voted.
+let voteDraft = null; // the hex you've clicked on, before aiming it
+
+function crowdHtml() {
+  const b = state.bracket;
+  if (!b || !b.cur) return '';
+  const votes = Object.values(b.votes), n = votes.length;
+  if (mySeat()) {
+    return n ? `<p class="hint">👻 ${n} knocked-out player${n === 1 ? ' has' : 's have'} voted on a hex for next round…</p>` : '';
+  }
+  if (!b.out.includes(session.id)) {
+    return b.entrants.some((e) => e.id === session.id) ? '<p class="hint">You’re still in — your match is coming up.</p>' : '';
+  }
+  if (state.phase !== 'play' && state.phase !== 'duel') {
+    return '<div class="crowd"><p class="hint">👻 The votes are in. Voting opens again when the next round starts.</p></div>';
+  }
+  const mine = b.votes[session.id], sel = HEXES[voteDraft] ? voteDraft : null;
+  const cards = Object.entries(HEXES).map(([k, H]) => {
+    const c = votes.filter((v) => v.hex === k).length;
+    return `<button class="rule-card ${sel === k ? 'chosen' : ''}" data-hex="${k}">
+      <span class="ricon">${H.icon}</span><b>${H.name}</b><span class="hint">${H.desc}</span>
+      <span class="votes">${c} vote${c === 1 ? '' : 's'}</span></button>`;
+  }).join('');
+  let picker = '';
+  if (sel && HEXES[sel].target === 'cell') {
+    const blank = { ...state, board: {}, winLine: null, spent: [] };
+    picker = `<div class="picker"><p class="hint">Click the square to curse.</p>${gridHtml(blank, {
+      cell: (sq) => (sq.kind === 'play' && !sq.wild ? `data-votefor="${sq.k}"` : '') })}</div>`;
+  } else if (sel) {
+    picker = `<div class="choices"><span>${HEXES[sel].icon} ${HEXES[sel].name} on:</span>${SEATS.map((s) =>
+      `<button class="seat-${s}" data-votefor="${s}">${nameOf(s)} (${MARKS[s]})</button>`).join('')}</div>`;
+  }
+  let yours = '<p class="hint">Pick a hex. When the round ends, the one with the most votes hits the next round.</p>';
+  if (mine) {
+    const H = HEXES[mine.hex];
+    const on = H.target === 'cell' ? 'on a square' : `on ${nameOf(mine.target)}`;
+    yours = `<p>Your vote: <b>${H.icon} ${H.name}</b> ${on}.
+      <button class="mini ghost" data-unvote>Take it back</button></p>`;
+  }
+  return `<div class="crowd"><h3>👻 You’re knocked out — hex the next round</h3>
+    <div class="rule-cards">${cards}</div>${picker}${yours}</div>`;
+}
+
+const HEX_NOW = {
+  stumble: 'misses a turn',
+  jinx: 'has a 1 in 4 chance of losing each tile placed',
+  traitor: 'gives their first tile to their opponent',
+};
 
 // What's in play this round, under the board.
 function roundRulesHtml() {
@@ -1045,6 +1196,7 @@ function roundRulesHtml() {
     if (e.type === 'shift') return `↔️ Shift: after two turns each, ${shiftLabel(state, e)}.`;
     if (e.type === 'roleSwap') return '🔀 Role Swap: after two turns, X and O swap owners.';
     if (e.type === 'turnSwap') return `🔄 Turn Swap: ${by} opponent’s turns may be snatched.`;
+    if (HEX_NOW[e.type]) return `👻 ${HEXES[e.type].icon} ${HEXES[e.type].name}: ${nameOf(e.on)} ${HEX_NOW[e.type]}.`;
     return '';
   });
   return notes.length ? `<ul class="round-rules">${notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : '';
@@ -1185,6 +1337,8 @@ function showHome() {
 
 $('host-play-btn').onclick = () => hostNewGame(false);
 $('host-watch-btn').onclick = () => hostNewGame(true);
+$('bracket-play-btn').onclick = () => hostNewGame(false, true);
+$('bracket-watch-btn').onclick = () => hostNewGame(true, true);
 $('join-form').onsubmit = (e) => {
   e.preventDefault();
   const code = $('join-code').value.trim().toUpperCase();
@@ -1218,12 +1372,44 @@ $('requests').addEventListener('click', (e) => {
   if (!b) return;
   if (b.dataset.letin !== undefined) letIn(b.dataset.letin, b.dataset.play !== undefined);
   else if (b.dataset.turnaway !== undefined) turnAway(b.dataset.turnaway);
+  else if (b.dataset.forfeit !== undefined) {
+    const id = b.dataset.forfeit, name = memberName(id);
+    if (!confirm(`Forfeit ${name}'s match? They'll be knocked out.`)) return;
+    if (forfeit(state, id, false)) commit();
+  }
 });
+
+// What the owner does to run a bracket. These change the game directly, like
+// letting people in does.
+function bracketClick(d) {
+  const b = state.bracket;
+  if (!b || session.role !== 'owner') return false;
+  if (d.startbracket !== undefined) startBracket(state);
+  else if (d.nextmatch !== undefined) nextMatch(state);
+  else if (d.newbracket !== undefined) resetBracket(state);
+  else if (state.phase !== 'lobby') return false;
+  else if (d.wins !== undefined) b.target = +d.wins;
+  else if (d.unenter !== undefined) b.entrants = b.entrants.filter((e) => e.id !== d.unenter);
+  else if (d.enter !== undefined) {
+    const w = state.watchers.find((x) => x.id === d.enter);
+    if (w && !b.entrants.some((e) => e.id === w.id)) b.entrants.push({ id: w.id, name: w.name });
+  } else return false;
+  commit();
+  return true;
+}
 
 $('panel').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.cell !== undefined) act({ type: 'move', cell: b.dataset.cell });
+  if (bracketClick(b.dataset)) return;
+  if (b.dataset.hex !== undefined) {
+    voteDraft = b.dataset.hex;
+    render();
+  } else if (b.dataset.votefor !== undefined) {
+    act({ type: 'vote', hex: voteDraft, target: b.dataset.votefor });
+    voteDraft = null;
+  } else if (b.dataset.unvote !== undefined) act({ type: 'vote', hex: null });
+  else if (b.dataset.cell !== undefined) act({ type: 'move', cell: b.dataset.cell });
   else if (b.dataset.place !== undefined) act({ type: 'place', target: JSON.parse(b.dataset.place) });
   else if (b.dataset.rulecard !== undefined) {
     ruleDraft.type = b.dataset.rulecard;

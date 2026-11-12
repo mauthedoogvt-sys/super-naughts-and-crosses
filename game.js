@@ -191,11 +191,11 @@ function shiftLine(s, e) {
   s.board = board;
 }
 
-// A new wildcard, which starts counting after 1–6 turns.
+// A new wildcard, which starts counting after 1–24 turns.
 function addWild(s, k) {
   if (s.wilds.includes(k)) return;
   s.wilds.push(k);
-  s.wildWait[k] = randInt(6) + 1;
+  s.wildWait[k] = randInt(24) + 1;
 }
 
 // Every turn taken counts down the wildcards still waiting. Returns true if
@@ -236,7 +236,7 @@ const RULES = {
   },
   delLine: {
     name: 'Delete a Line', icon: '✂️', target: 'line',
-    desc: 'Delete a row or column. Every square taken away is replaced by a wildcard (each one ready after a few turns). Take one from the middle and the board splits.',
+    desc: 'Delete a row or column. Every square taken away is replaced by a wildcard (each one ready after a random wait, up to 24 turns). Take one from the middle and the board splits.',
     ok: (s) => gridSquares(s).length > 9 && (liveLines(s, 'row').length > 3 || liveLines(s, 'col').length > 3),
     apply(s, seat, t) {
       if (!t || (t.axis !== 'row' && t.axis !== 'col')) return null;
@@ -281,7 +281,7 @@ const RULES = {
   },
   wildcard: {
     name: 'Wildcard', icon: '★', target: 'wild',
-    desc: 'Add a wildcard square — on the board or just outside it. After a random number of turns it counts as X and O, but a line can only use one wildcard, and it’s used up once it’s in a winning line.',
+    desc: 'Add a wildcard square — on the board or just outside it. After a random number of turns (up to 24) it counts as X and O, but a line can only use one wildcard, and it’s used up once it’s in a winning line.',
     apply(s, seat, k) {
       if (typeof k !== 'string' || !/^-?\d+,-?\d+$/.test(k) || s.wilds.includes(k)) return null;
       const [r, c] = unkey(k);
@@ -565,13 +565,226 @@ function startDuel(s) {
   nextDuel(s.duel);
 }
 
+// ---- Brackets --------------------------------------------------------------
+// A bracket is a knockout between everyone the owner lets in to play. Matches
+// are played one at a time on the same board, first to `target` rounds, and
+// everyone else watches. s.bracket holds:
+//   entrants   [{ id, name }], fixed once it starts
+//   rounds     [[{ a, b, winner }]] of ids; the last round is the final
+//   cur        { r, m }: the match being played
+//   out        ids of everyone knocked out. They haunt the matches that
+//              follow: each round they vote on a hex for the next one.
+//   gone       ids of entrants who left; their matches are walkovers
+//   votes      id -> { hex, target }, this round's votes
+//   last       { winner, loser, score, forfeit } of the match just finished
+//   champion   id, once the final is won
+
+// What the knocked-out can vote for. `target` is what a vote is aimed at:
+// 'cell' (a square) or 'player' (the X or O seat).
+const HEXES = {
+  curse: {
+    name: 'Curse', icon: '💀', target: 'cell',
+    desc: 'Curse a square. Neither player is told where; the first tile placed there is dropped.',
+  },
+  stumble: {
+    name: 'Stumble', icon: '🦶', target: 'player',
+    desc: 'They miss their first turn next round.',
+  },
+  jinx: {
+    name: 'Jinx', icon: '🎲', target: 'player',
+    desc: 'Next round, every tile they place has a 1 in 4 chance of slipping away.',
+  },
+  traitor: {
+    name: 'Traitor', icon: '🗡️', target: 'player',
+    desc: 'Next round, the first tile they place turns into their opponent’s.',
+  },
+};
+
+function newBracket() {
+  return { target: 2, entrants: [], rounds: [], cur: null, out: [], gone: [], votes: {}, last: null, champion: null };
+}
+
+const entrantName = (s, id) => s.bracket.entrants.find((e) => e.id === id)?.name || 'Nobody';
+
+// Draws the bracket and starts its first match.
+function startBracket(s) {
+  const b = s.bracket;
+  if (!b || s.phase !== 'lobby' || b.entrants.length < 2) return false;
+  s.banner.open = false;
+  const ids = shuffle(b.entrants.map((e) => e.id));
+  let size = 2;
+  while (size < ids.length) size *= 2;
+  // When the numbers don't fill it, some get a bye: a first-round match with
+  // nobody to play.
+  const byes = size - ids.length;
+  b.rounds = [];
+  for (let n = size / 2; n >= 1; n /= 2) b.rounds.push([...Array(n)].map(() => ({ a: null, b: null, winner: null })));
+  b.rounds[0].forEach((m, i) => {
+    m.a = ids.shift();
+    if (i >= byes) m.b = ids.shift();
+  });
+  Object.assign(b, { cur: null, out: [], gone: [], votes: {}, last: null, champion: null });
+  b.rounds[0].forEach((m, i) => { if (!m.b) settle(b, 0, i, m.a); });
+  note(s, `The bracket begins: ${b.entrants.length} players, first to ${b.target} wins each match.`);
+  seatNext(s);
+  return true;
+}
+
+// Records a match's winner and moves them on.
+function settle(b, r, m, winner) {
+  b.rounds[r][m].winner = winner;
+  if (r + 1 < b.rounds.length) b.rounds[r + 1][m >> 1][m % 2 ? 'b' : 'a'] = winner;
+  else b.champion = winner;
+}
+
+// Seats the next match's two players and starts it. A match against someone
+// who left is won without playing.
+function seatNext(s) {
+  const b = s.bracket;
+  for (let r = 0; r < b.rounds.length; r++) {
+    for (let m = 0; m < b.rounds[r].length; m++) {
+      const match = b.rounds[r][m];
+      if (match.winner || !match.a || !match.b) continue;
+      const left = [match.a, match.b].find((id) => b.gone.includes(id));
+      if (left) {
+        const winner = left === match.a ? match.b : match.a;
+        if (!b.out.includes(left)) b.out.push(left);
+        b.last = { winner, loser: left, forfeit: true };
+        note(s, `${entrantName(s, winner)} goes through: ${entrantName(s, left)} left.`);
+        settle(b, r, m, winner);
+        continue;
+      }
+      b.cur = { r, m };
+      const pair = shuffle([match.a, match.b]);
+      SEATS.forEach((seat, i) => { s.players[seat] = { id: pair[i], name: entrantName(s, pair[i]) }; });
+      s.watchers = s.watchers.filter((w) => !pair.includes(w.id));
+      note(s, `${roundName(b, r)}: ${s.players.x.name} (X) against ${s.players.o.name} (O).`);
+      announce(s, `${s.players.x.name} VS ${s.players.o.name}`.toUpperCase(), 'event');
+      newMatch(s);
+      return;
+    }
+  }
+  // Nothing left to play: the bracket has its champion.
+  s.phase = 'matchover';
+}
+
+function roundName(b, r) {
+  const left = b.rounds.length - r;
+  return left === 1 ? 'Final' : left === 2 ? 'Semi-final' : left === 3 ? 'Quarter-final' : `Round ${r + 1}`;
+}
+
+// The seated players go back to watching.
+function unseat(s) {
+  for (const seat of SEATS) {
+    const p = s.players[seat];
+    if (p && !s.watchers.some((w) => w.id === p.id)) s.watchers.push(p);
+    s.players[seat] = null;
+  }
+}
+
+// The player in `seat` wins the match being played; the other is knocked out.
+function finishMatch(s, seat, forfeit) {
+  const b = s.bracket, { r, m } = b.cur, match = b.rounds[r][m];
+  const winner = s.players[seat].id, loser = winner === match.a ? match.b : match.a;
+  b.out.push(loser);
+  b.votes = {};
+  b.last = { winner, loser, forfeit: !!forfeit, score: [s.scores[seat], s.scores[other(seat)]] };
+  b.cur = null;
+  settle(b, r, m, winner);
+  note(s, `${entrantName(s, winner)} wins the match${forfeit ? ' by forfeit' : ''}. ${entrantName(s, loser)} is knocked out.`);
+  if (b.champion) note(s, `🏆 ${entrantName(s, winner)} wins the bracket!`);
+  s.phase = 'matchover';
+}
+
+// On to the next match. Only the owner's browser calls this.
+function nextMatch(s) {
+  const b = s.bracket;
+  if (!b || s.phase !== 'matchover' || b.champion) return false;
+  s.banner.open = false;
+  unseat(s);
+  seatNext(s);
+  return true;
+}
+
+// Entrant `id` gives up: the match they're playing goes to their opponent.
+// With `leaving`, every later match of theirs is a walkover too.
+function forfeit(s, id, leaving) {
+  const b = s.bracket;
+  if (!b || !b.rounds.length || b.champion) return false;
+  if (leaving && !b.gone.includes(id)) b.gone.push(id);
+  const seat = SEATS.find((x) => s.players[x]?.id === id);
+  if (seat && b.cur) finishMatch(s, other(seat), true);
+  return true;
+}
+
+// Back to the lobby for another bracket with whoever is still here.
+function resetBracket(s) {
+  const b = s.bracket;
+  if (!b || s.phase !== 'matchover' || !b.champion) return false;
+  unseat(s);
+  const entrants = b.entrants.filter((e) => !b.gone.includes(e.id) && s.watchers.some((w) => w.id === e.id));
+  s.bracket = { ...newBracket(), target: b.target, entrants };
+  s.board = {};
+  s.winLine = null;
+  s.rules = [];
+  s.scores = { x: 0, o: 0 };
+  s.phase = 'lobby';
+  return true;
+}
+
+// A knocked-out player's vote for next round's hex (hex null takes it back).
+function vote(s, id, a) {
+  const b = s.bracket;
+  if (!b || !b.cur || !b.out.includes(id) || (s.phase !== 'play' && s.phase !== 'duel')) return false;
+  if (a.hex == null) {
+    if (!b.votes[id]) return false;
+    delete b.votes[id];
+    return true;
+  }
+  const H = Object.hasOwn(HEXES, a.hex) && HEXES[a.hex];
+  if (!H) return false;
+  if (H.target === 'cell' ? typeof a.target !== 'string' || !playable(s, a.target) : !SEATS.includes(a.target)) return false;
+  b.votes[id] = { hex: a.hex, target: a.target };
+  return true;
+}
+
+// The most common of a list, picking at random between equals.
+function mostVoted(list) {
+  const counts = {};
+  for (const v of list) counts[v] = (counts[v] || 0) + 1;
+  const max = Math.max(...Object.values(counts));
+  const top = Object.keys(counts).filter((k) => counts[k] === max);
+  return top[randInt(top.length)];
+}
+
+// At the end of a round the votes are counted: the hex with the most votes
+// wins, aimed wherever most of its voters aimed it.
+function tallyVotes(s) {
+  const b = s.bracket, votes = Object.values(b.votes);
+  b.votes = {};
+  if (!votes.length) return;
+  const hex = mostVoted(votes.map((v) => v.hex));
+  const target = mostVoted(votes.filter((v) => v.hex === hex).map((v) => v.target));
+  const H = HEXES[hex];
+  if (H.target === 'cell') {
+    if (!playable(s, target)) return;
+    s.curses.push({ key: target, by: null });
+    note(s, `👻 The knocked-out voted: ${H.icon} ${H.name}. A hidden square is cursed.`);
+  } else {
+    s.pending.push({ type: hex, on: target });
+    note(s, `👻 The knocked-out voted: ${H.icon} ${H.name} on ${s.players[target]?.name || MARKS[target]}, next round.`);
+  }
+  s.hexed = H.name;
+}
+
 // ---- Game state -----------------------------------------------------------
 
-function createGame(code) {
+function createGame(code, bracket) {
   return {
+    bracket: bracket ? newBracket() : null, // see Brackets, above
     v: 0,
     code,
-    phase: 'lobby', // lobby | play | duel | place | rule
+    phase: 'lobby', // lobby | play | duel | place | rule | matchover (brackets)
     players: { x: null, o: null }, // { id, name } of whoever sits there
     watchers: [],                  // [{ id, name }]
     round: 1,
@@ -583,8 +796,9 @@ function createGame(code) {
     wildWait: {},                  // "r,c" -> turns until that wildcard counts
     spent: [],                     // wildcards used up in the winning line, to show until next round
     curses: [],                    // [{ key, by }], hidden from both players
-    pending: [],                   // rules that start next round
+    pending: [],                   // rules (and hexes) that start next round
     active: [],                    // rules in play this round
+    hexed: null,                   // name of the hex just voted in, to announce
     cheat: { x: false, o: false },
     offer: null,                   // the three rules the round's winner picks from
     turnLog: [],                   // [{ seat, kind }] this round, for the turn order
@@ -639,6 +853,8 @@ function startRound(s) {
   s.turnLog = [];
   s.first = randInt(2) ? 'x' : 'o'; // coin flip for who goes first
   s.phase = 'play';
+  if (s.hexed) announce(s, `HEX: ${s.hexed.toUpperCase()}`, 'rev');
+  s.hexed = null;
   beginTurn(s, s.first);
 }
 
@@ -649,7 +865,11 @@ function swapSeats(s) {
   flip(s.scores);
   flip(s.rematch);
   flip(s.cheat);
-  for (const e of [...s.active, ...s.pending, ...s.curses, ...s.rules]) e.by = other(e.by);
+  for (const e of [...s.active, ...s.pending, ...s.curses, ...s.rules]) {
+    if (e.by) e.by = other(e.by);
+    if (e.on) e.on = other(e.on); // a hex stays on the person
+  }
+  for (const v of Object.values(s.bracket?.votes || {})) if (SEATS.includes(v.target)) v.target = other(v.target);
 }
 
 function beginTurn(s, seat) {
@@ -673,6 +893,14 @@ function beginTurn(s, seat) {
       s.turnLog.push({ seat, kind: 'reversal' });
       seat = swap.by;
     }
+  }
+  const stumble = activeRule(s, 'stumble');
+  if (stumble && !stumble.done && stumble.on === seat) {
+    stumble.done = true;
+    s.turnLog.push({ seat, kind: 'stumble' });
+    announce(s, 'STUMBLE!', 'rev');
+    note(s, `${MARKS[seat]} stumbled and missed a turn.`);
+    return endTurn(s, seat);
   }
   announce(s, `${MARKS[seat]} TURN START`, seat);
   s.turn = seat;
@@ -720,12 +948,16 @@ function endRound(s, winner, how) {
   s.roundWinner = winner;
   s.winHow = how;
   s.scores[winner]++;
+  if (s.bracket) {
+    if (s.scores[winner] >= s.bracket.target) return finishMatch(s, winner);
+    tallyVotes(s);
+  }
   s.phase = 'place';
 }
 
 // Applies one person's action. `seat` is 'x', 'o', or null for someone
-// watching; `name` is theirs, for chat. Returns true if the state changed.
-function applyAction(s, seat, a, name) {
+// watching; `name` and `id` are theirs. Returns true if the state changed.
+function applyAction(s, seat, a, name, id) {
   if (!a || typeof a !== 'object') return false;
   s.banner.open = false;
   switch (a.type) {
@@ -733,6 +965,7 @@ function applyAction(s, seat, a, name) {
     case 'advance': return advance(s);
     case 'quickdraw': return quickDraw(s);
     case 'forcedraw': return forceDraw(s);
+    case 'vote': return vote(s, id, a);
   }
   if (!SEATS.includes(seat)) return false;
   switch (a.type) {
@@ -779,12 +1012,28 @@ function move(s, seat, cell) {
     endTurn(s, seat);
     return true;
   }
-  s.board[cell] = seat;
+  const jinx = activeRule(s, 'jinx');
+  if (jinx && jinx.on === seat && randInt(4) === 0) {
+    s.turnLog.push({ seat, kind: 'jinxed' });
+    announce(s, 'JINXED!', 'rev');
+    note(s, `${MARKS[seat]}’s tile slipped away — jinxed.`);
+    endTurn(s, seat);
+    return true;
+  }
+  let mark = seat;
+  const traitor = activeRule(s, 'traitor');
+  if (traitor && !traitor.done && traitor.on === seat) {
+    traitor.done = true;
+    mark = other(seat);
+    announce(s, 'TRAITOR!', 'rev');
+    note(s, `${MARKS[seat]}’s tile turned traitor: it’s ${MARKS[mark]}’s now.`);
+  }
+  s.board[cell] = mark;
   s.turnLog.push({ seat, kind: 'move' });
-  const line = findLine(s, seat);
+  const line = findLine(s, mark);
   if (line) {
     s.winLine = line;
-    endRound(s, seat, 'line');
+    endRound(s, mark, 'line');
   } else {
     endTurn(s, seat);
   }
@@ -849,7 +1098,7 @@ function addRule(s, seat, rule, target, name) {
 }
 
 function rematch(s, seat) {
-  if (s.phase === 'lobby' || s.rematch[seat]) return false;
+  if (s.bracket || s.phase === 'lobby' || s.rematch[seat]) return false;
   s.rematch[seat] = true;
   if (s.rematch[other(seat)]) newMatch(s);
   return true;
@@ -863,7 +1112,7 @@ function chat(s, seat, text, name) {
   return true;
 }
 
-// The copy of the state a player is allowed to see: nobody sees the curses,
+// The copy of the state a player is allowed to see: neither sees the curses,
 // and until a bonus game is revealed, the opponent's pick and the game's
 // secrets are hidden (apart from what a cheat lets through). Someone watching
 // (seat null) sees everything.
@@ -871,6 +1120,8 @@ function viewFor(s, seat) {
   const v = JSON.parse(JSON.stringify(s));
   if (!SEATS.includes(seat)) return v;
   v.curses = [];
+  // Nor what the knocked-out are voting for, only how many have voted.
+  if (v.bracket) v.bracket.votes = Object.fromEntries(Object.keys(v.bracket.votes).map((id) => [id, {}]));
   const d = v.duel;
   if (v.phase === 'duel' && d && !d.result) {
     const game = DUELS[d.type];

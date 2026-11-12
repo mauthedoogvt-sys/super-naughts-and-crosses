@@ -33,6 +33,15 @@
     </div>
 
     <div class="card">
+      <label>Host a bracket</label>
+      <div class="row">
+        <button id="bracket-play-btn" class="primary grow">I'll play</button>
+        <button id="bracket-watch-btn" class="grow">I'll watch</button>
+      </div>
+      <p class="hint">A knockout for three or more. Whoever is knocked out gets to vote on hexes for the matches that follow.</p>
+    </div>
+
+    <div class="card">
       <form id="join-form">
         <label for="join-code">Join with a code</label>
         <div class="row">
@@ -59,6 +68,10 @@
     <div class="layout">
       <main id="panel" class="card"></main>
       <aside>
+        <section id="bracket-card" class="card" hidden>
+          <h3>Bracket</h3>
+          <div id="bracket"></div>
+        </section>
         <section class="card">
           <h3>Rules</h3>
           <ol id="rules"></ol>
